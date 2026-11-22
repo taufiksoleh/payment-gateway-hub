@@ -14,6 +14,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox/outboxtest"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/postgres"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/storagetest"
 	"github.com/taufiksoleh/payment-gateway-hub/migrations"
 )
 
@@ -164,5 +165,17 @@ func TestRepositories(t *testing.T) {
 			return outboxtest.Account{MerchantID: mm.ID, PaymentID: pp.ID}
 		}
 		outboxtest.RunWebhookRepositoryContract(t, postgres.NewOutboxStore(db), account("a"), account("b"))
+	})
+
+	t.Run("payment list contract", func(t *testing.T) {
+		fresh := func(name string) string {
+			t.Helper()
+			mm, _ := domain.NewMerchant("mch_list_"+name+"_"+suffix, name, "hash_list_"+name+"_"+suffix, "", "whsec", now)
+			if err := merchants.Create(ctx, mm); err != nil {
+				t.Fatal(err)
+			}
+			return mm.ID
+		}
+		storagetest.RunPaymentListContract(t, payments, fresh("a"), fresh("b"), "pay_list_"+suffix+"_")
 	})
 }

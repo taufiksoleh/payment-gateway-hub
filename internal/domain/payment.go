@@ -28,6 +28,16 @@ var allowedTransitions = map[Status][]Status{
 	StatusPartiallyRefunded: {StatusRefunded},
 }
 
+// Valid reports whether s is a known status.
+func (s Status) Valid() bool {
+	switch s {
+	case StatusPending, StatusPaid, StatusFailed, StatusExpired, StatusCancelled,
+		StatusPartiallyRefunded, StatusRefunded:
+		return true
+	}
+	return false
+}
+
 // CanTransitionTo reports whether moving from s to next is allowed.
 func (s Status) CanTransitionTo(next Status) bool {
 	for _, allowed := range allowedTransitions[s] {

@@ -22,6 +22,23 @@ type PaymentRepository interface {
 	Update(ctx context.Context, p *domain.Payment) error
 	FindByID(ctx context.Context, id string) (*domain.Payment, error)
 	FindByOrderID(ctx context.Context, merchantID, orderID string) (*domain.Payment, error)
+
+	// List returns the merchant's payments matching f, newest first
+	// (created_at, then id, descending).
+	List(ctx context.Context, merchantID string, f PaymentFilter) ([]domain.Payment, error)
+}
+
+// PaymentFilter narrows a payment list. Zero values mean "any". It is
+// validated by PaymentService.List before it reaches a repository.
+type PaymentFilter struct {
+	Status      domain.Status
+	Provider    domain.Provider
+	Method      domain.Method
+	OrderID     string
+	CreatedFrom time.Time // inclusive
+	CreatedTo   time.Time // exclusive
+	Limit       int
+	Cursor      string // id of the last payment of the previous page
 }
 
 // MerchantRepository persists merchants.

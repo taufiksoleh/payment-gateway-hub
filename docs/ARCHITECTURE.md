@@ -170,6 +170,20 @@ changed nothing a retry could duplicate, and refund reservations already
 guard the one case where it might have. The same contract test
 (`idempotencytest.RunStoreContract`) runs against both stores.
 
+**Lists use keyset pagination.** `GET /v1/payments` and `GET /v1/webhooks`
+both order by `(created_at DESC, id DESC)` and page with a cursor (the last
+id), rather than `OFFSET`:
+
+- **Rows arriving mid-paging** don't shift later pages, so nothing is
+  skipped or repeated.
+- **Deep pages stay cheap.** The cursor comparison
+  `(created_at, id) < (...)` is served by the
+  `(merchant_id, created_at DESC, id DESC)` index, with no sort step.
+- **`id` breaks ties** between rows created at the same instant.
+- **Detecting the last page:** the use case asks the repository for `limit+1`
+  rows to know whether another page exists, so `next_cursor` is never set on
+  the last page.
+
 **Domain types have no JSON tags.** Wire formats live in `transport/dto`
 (public API), in each vendor package (vendor API), and in `postgres`
 (storage). Renaming a JSON field never touches business code.
@@ -222,4 +236,4 @@ later, notify.Dispatcher:
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
 | Dispatcher | Signed delivery, backoff timing, giving up after max attempts, merchants without a URL, the run loop, delivering a replayed dead webhook | memory outbox + `httptest` merchant server + fake clock |
 | HTTP | Routing, auth, error mapping, full flow, Idempotency-Key replay/reuse/in-progress/retry-after-failure | `httptest` + real use cases + memory repos |
-| Storage | SQL correctness, migrations, optimistic locks, outbox atomicity (a losing update writes no event), the idempotency, outbox and webhook-repository contracts | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |
+| Storage | SQL correctness, migrations, optimistic locks, outbox atomicity (a losing update writes no event), the payment-list, idempotency, outbox and webhook-repository contracts | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |

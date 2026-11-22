@@ -10,6 +10,7 @@ import (
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
 // PaymentRepo stores payments in a map. Events recorded on a payment are
@@ -91,6 +92,58 @@ func (r *PaymentRepo) FindByOrderID(_ context.Context, merchantID, orderID strin
 		}
 	}
 	return nil, domain.ErrNotFound
+}
+
+func (r *PaymentRepo) List(_ context.Context, merchantID string, f usecase.PaymentFilter) ([]domain.Payment, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var out []domain.Payment
+	for _, p := range r.byID {
+		if p.MerchantID == merchantID && matches(p, f) {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return paymentNewerFirst(out[i], out[j]) })
+
+	// Keyset pagination: keep only payments strictly older than the cursor.
+	if f.Cursor != "" {
+		cursor, ok := r.byID[f.Cursor]
+		if !ok || cursor.MerchantID != merchantID {
+			return nil, nil
+		}
+		i := 0
+		for i < len(out) && !paymentNewerFirst(cursor, out[i]) {
+			i++
+		}
+		out = out[i:]
+	}
+	if len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, nil
+}
+
+// matches mirrors the WHERE clause of the Postgres List.
+func matches(p domain.Payment, f usecase.PaymentFilter) bool {
+	switch {
+	case f.Status != "" && p.Status != f.Status,
+		f.Provider != "" && p.Provider != f.Provider,
+		f.Method != "" && p.Method != f.Method,
+		f.OrderID != "" && p.OrderID != f.OrderID,
+		!f.CreatedFrom.IsZero() && p.CreatedAt.Before(f.CreatedFrom),
+		!f.CreatedTo.IsZero() && !p.CreatedAt.Before(f.CreatedTo):
+		return false
+	}
+	return true
+}
+
+// paymentNewerFirst orders by created_at, then id, both descending.
+func paymentNewerFirst(a, b domain.Payment) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID > b.ID
 }
 
 // MerchantRepo stores merchants in a map.

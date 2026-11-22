@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
 // PaymentRepo implements usecase.PaymentRepository. Events recorded on a
@@ -133,7 +136,59 @@ func (r *PaymentRepo) FindByOrderID(ctx context.Context, merchantID, orderID str
 	return scanPayment(row)
 }
 
-func scanPayment(row *sql.Row) (*domain.Payment, error) {
+// List returns a page of the merchant's payments, newest first. Paging is
+// keyset-based on (created_at, id), so pages stay stable while new payments
+// arrive. Filters are appended only when set, keeping the SQL readable.
+func (r *PaymentRepo) List(ctx context.Context, merchantID string, f usecase.PaymentFilter) ([]domain.Payment, error) {
+	query := `SELECT ` + paymentColumns + ` FROM payments WHERE merchant_id = $1`
+	args := []any{merchantID}
+	where := func(clause string, value any) {
+		args = append(args, value)
+		query += " AND " + strings.ReplaceAll(clause, "?", "$"+strconv.Itoa(len(args)))
+	}
+
+	if f.Status != "" {
+		where("status = ?", f.Status)
+	}
+	if f.Provider != "" {
+		where("provider = ?", f.Provider)
+	}
+	if f.Method != "" {
+		where("method = ?", f.Method)
+	}
+	if f.OrderID != "" {
+		where("order_id = ?", f.OrderID)
+	}
+	if !f.CreatedFrom.IsZero() {
+		where("created_at >= ?", f.CreatedFrom)
+	}
+	if !f.CreatedTo.IsZero() {
+		where("created_at < ?", f.CreatedTo)
+	}
+	if f.Cursor != "" {
+		where("(created_at, id) < (SELECT created_at, id FROM payments WHERE id = ? AND merchant_id = $1)", f.Cursor)
+	}
+	args = append(args, f.Limit)
+	query += " ORDER BY created_at DESC, id DESC LIMIT $" + strconv.Itoa(len(args))
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Payment
+	for rows.Next() {
+		p, err := scanPayment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+func scanPayment(row scanner) (*domain.Payment, error) {
 	var (
 		p         domain.Payment
 		action    []byte

@@ -3,6 +3,8 @@ package httpapi
 import (
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
@@ -121,4 +123,63 @@ func (h *handlers) providerWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type paymentListResponse struct {
+	Payments   []dto.Payment `json:"payments"`
+	NextCursor string        `json:"next_cursor,omitempty"`
+}
+
+// GET /v1/payments?status=paid&provider=midtrans&method=qris&order_id=...
+//
+//	&created_from=2026-11-01T00:00:00+07:00&created_to=...&limit=50&cursor=pay_...
+func (h *handlers) listPayments(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := usecase.PaymentFilter{
+		Status:   domain.Status(q.Get("status")),
+		Provider: domain.Provider(q.Get("provider")),
+		Method:   domain.Method(q.Get("method")),
+		OrderID:  q.Get("order_id"),
+		Cursor:   q.Get("cursor"),
+	}
+
+	var err error
+	if f.CreatedFrom, err = queryTime(q.Get("created_from"), "created_from"); err != nil {
+		writeError(w, err)
+		return
+	}
+	if f.CreatedTo, err = queryTime(q.Get("created_to"), "created_to"); err != nil {
+		writeError(w, err)
+		return
+	}
+	if s := q.Get("limit"); s != "" {
+		if f.Limit, err = strconv.Atoi(s); err != nil {
+			writeError(w, domain.Invalid("limit", "must be a number"))
+			return
+		}
+	}
+
+	page, err := h.payments.List(r.Context(), merchantFrom(r.Context()).ID, f)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := paymentListResponse{Payments: make([]dto.Payment, 0, len(page.Payments)), NextCursor: page.NextCursor}
+	for _, p := range page.Payments {
+		out.Payments = append(out.Payments, dto.FromPayment(p))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// queryTime parses an optional RFC 3339 query parameter.
+func queryTime(value, field string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	// An unencoded "+" (as in +07:00) arrives as a space; accept it.
+	t, err := time.Parse(time.RFC3339, strings.ReplaceAll(value, " ", "+"))
+	if err != nil {
+		return time.Time{}, domain.Invalid(field, "must be an RFC 3339 time, e.g. 2026-11-01T00:00:00+07:00")
+	}
+	return t, nil
 }

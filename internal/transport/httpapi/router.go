@@ -19,6 +19,7 @@ import (
 type PaymentUsecase interface {
 	Create(ctx context.Context, merchantID string, in usecase.CreatePaymentInput) (*domain.Payment, error)
 	Get(ctx context.Context, merchantID, paymentID string) (*domain.Payment, error)
+	List(ctx context.Context, merchantID string, f usecase.PaymentFilter) (*usecase.PaymentPage, error)
 	Sync(ctx context.Context, merchantID, paymentID string) (*domain.Payment, error)
 	Refund(ctx context.Context, merchantID, paymentID string, in usecase.RefundInput) (*domain.Payment, error)
 	HandleWebhook(ctx context.Context, provider domain.Provider, merchantID string, req gateway.WebhookRequest) error
@@ -76,6 +77,7 @@ func NewRouter(d Deps) http.Handler {
 
 	// Merchant: payments
 	mux.Handle("POST /v1/payments", merchantIdem(h.createPayment))
+	mux.Handle("GET /v1/payments", merchant(http.HandlerFunc(h.listPayments)))
 	mux.Handle("GET /v1/payments/{id}", merchant(http.HandlerFunc(h.getPayment)))
 	mux.Handle("POST /v1/payments/{id}/sync", merchant(http.HandlerFunc(h.syncPayment)))
 	mux.Handle("POST /v1/payments/{id}/refunds", merchantIdem(h.refundPayment))

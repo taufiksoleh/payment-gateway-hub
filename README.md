@@ -104,6 +104,7 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 | PUT | `/v1/gateways/{provider}` | API key | Add or replace vendor credentials |
 | DELETE | `/v1/gateways/{provider}` | API key | Remove vendor credentials |
 | POST | `/v1/payments` | API key | Create a payment |
+| GET | `/v1/payments` | API key | Your payments, newest first (filters and paging below) |
 | GET | `/v1/payments/{id}` | API key | Get a payment |
 | POST | `/v1/payments/{id}/sync` | API key | Pull latest status from the vendor |
 | POST | `/v1/payments/{id}/refunds` | API key | Refund (`amount` optional, defaults to full) |
@@ -114,6 +115,27 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 | POST | `/webhooks/{provider}/{merchant_id}` | vendor signature | Vendor notifications |
 
 Errors always look like `{"error": {"code": "...", "message": "...", "field": "..."}}`.
+
+### Listing payments
+
+```bash
+curl -s "localhost:8080/v1/payments?status=paid&provider=midtrans&created_from=2026-11-01T00:00:00%2B07:00&limit=50" \
+  -H "Authorization: Bearer $API_KEY"
+#   → {"payments":[{...}, ...], "next_cursor":"pay_..."}   ← pass as ?cursor= for the next page
+```
+
+| Parameter | Meaning |
+|---|---|
+| `status` | `pending`, `paid`, `failed`, `expired`, `cancelled`, `partially_refunded` or `refunded` |
+| `provider` | `midtrans`, `xendit` or `doku` |
+| `method` | `virtual_account`, `qris`, `ewallet`, `retail_outlet` or `card` |
+| `order_id` | Your own order reference (exact match) |
+| `created_from`, `created_to` | RFC 3339 times. `from` is inclusive, `to` is exclusive. Encode `+` as `%2B`, or use `Z` |
+| `limit` | 1–200, default 50 |
+| `cursor` | The `next_cursor` from the previous page. It is absent on the last page |
+
+Filters combine with AND. Pages are cut by `(created_at, id)`, so new payments
+arriving while you page through never cause skipped or repeated rows.
 
 ### Safe retries with `Idempotency-Key`
 
@@ -242,4 +264,4 @@ This is a solid foundation, not yet production-certified. Before going live:
 - **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
 - **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
-- **Not yet built:** listing payments, rate limiting, API key rotation, metrics.
+- **Not yet built:** rate limiting, API key rotation, metrics.
