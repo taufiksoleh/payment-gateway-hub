@@ -19,9 +19,11 @@ type Outbox struct {
 
 	mu      sync.Mutex
 	entries map[string]*outboxEntry
+	seq     int64 // insertion counter, to order messages created at the same instant
 }
 
 type outboxEntry struct {
+	seq           int64
 	msg           outbox.Message
 	nextAttemptAt time.Time
 	lockedUntil   time.Time
@@ -46,7 +48,8 @@ func (o *Outbox) Enqueue(_ context.Context, msgs ...outbox.Message) error {
 	defer o.mu.Unlock()
 	for _, m := range msgs {
 		m.Payload = append([]byte(nil), m.Payload...)
-		o.entries[m.ID] = &outboxEntry{msg: m, nextAttemptAt: m.CreatedAt}
+		o.seq++
+		o.entries[m.ID] = &outboxEntry{seq: o.seq, msg: m, nextAttemptAt: m.CreatedAt}
 	}
 	return nil
 }
@@ -117,11 +120,21 @@ func (o *Outbox) Purge(_ context.Context, before time.Time) (int64, error) {
 func (o *Outbox) Messages() []outbox.Message {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	out := make([]outbox.Message, 0, len(o.entries))
+	entries := make([]*outboxEntry, 0, len(o.entries))
 	for _, e := range o.entries {
-		out = append(out, e.msg)
+		entries = append(entries, e)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if !a.msg.CreatedAt.Equal(b.msg.CreatedAt) {
+			return a.msg.CreatedAt.Before(b.msg.CreatedAt)
+		}
+		return a.seq < b.seq
+	})
+	out := make([]outbox.Message, len(entries))
+	for i, e := range entries {
+		out[i] = e.msg
+	}
 	return out
 }
 
