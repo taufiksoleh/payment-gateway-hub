@@ -225,6 +225,11 @@ Keys belong to one merchant and are remembered for 24 hours.
 
 ### Vendor credentials
 
+Step-by-step setup for each provider (keys, webhook URL, sandbox testing,
+going live, troubleshooting): [docs/providers](docs/providers/README.md):
+[Midtrans](docs/providers/midtrans.md), [Xendit](docs/providers/xendit.md),
+[DOKU](docs/providers/doku.md).
+
 | Provider | `secrets` keys |
 |---|---|
 | `midtrans` | `server_key` |
@@ -334,6 +339,7 @@ docs/                    architecture and how-to guides
 
 Further reading:
 
+- [docs/providers](docs/providers/README.md): setting up Midtrans, Xendit and DOKU
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): layers, the dependency rule, SOLID in this codebase, and request flows
 - [docs/ADDING_A_GATEWAY.md](docs/ADDING_A_GATEWAY.md): a step-by-step guide to adding a vendor by hand
 
