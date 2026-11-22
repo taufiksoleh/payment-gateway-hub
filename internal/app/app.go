@@ -20,6 +20,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/ratelimit"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/postgres"
@@ -84,6 +85,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 			Providers:   gateways.Providers(),
 			AdminToken:  cfg.AdminToken,
 			Idempotency: repos.idempotency,
+			RateLimits:  rateLimits(cfg),
 			Logger:      log,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -213,5 +215,22 @@ func (a *App) purge(ctx context.Context, what string, fn func() (int64, error)) 
 	}
 	if n > 0 {
 		a.log.InfoContext(ctx, "purged "+what, "count", n)
+	}
+}
+
+// rateLimits builds the limiters from configuration. A rate of 0 leaves that
+// limiter nil, which disables it.
+func rateLimits(cfg config.Config) httpapi.RateLimits {
+	limiter := func(perMinute int) ratelimit.Limiter {
+		if perMinute == 0 {
+			return nil
+		}
+		return ratelimit.NewTokenBucket(perMinute, ratelimit.BurstFor(perMinute))
+	}
+	return httpapi.RateLimits{
+		PerIP:       limiter(cfg.RateLimitIPPerMin),
+		PerMerchant: limiter(cfg.RateLimitMerchantPerMin),
+		Admin:       limiter(cfg.RateLimitAdminPerMin),
+		TrustProxy:  cfg.TrustProxy,
 	}
 }

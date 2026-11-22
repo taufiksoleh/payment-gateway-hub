@@ -50,45 +50,54 @@ type Deps struct {
 	Providers   []domain.Provider // for GET /v1/providers
 	AdminToken  string            // protects merchant registration
 	Idempotency idempotency.Store // backs the Idempotency-Key header
+	RateLimits  RateLimits        // zero value: no limits
 	Logger      *slog.Logger
 }
 
 // NewRouter builds the HTTP handler with every route and middleware.
 func NewRouter(d Deps) http.Handler {
 	h := &handlers{payments: d.Payments, merchants: d.Merchants, webhooks: d.Webhooks, providers: d.Providers, log: d.Logger}
-	merchant := requireMerchant(d.Merchants)
-	admin := requireAdmin(d.AdminToken)
+	ip := clientIP(d.RateLimits.TrustProxy)
+	perIP := rateLimit(d.RateLimits.PerIP, "ip", ip)
+	perMerchant := rateLimit(d.RateLimits.PerMerchant, "merchant", merchantKey)
+	perAdminIP := rateLimit(d.RateLimits.Admin, "admin", ip)
+	auth := requireMerchant(d.Merchants)
 	idem := idempotent(d.Idempotency, d.Logger)
 
-	// Money-moving routes accept an Idempotency-Key header.
-	merchantIdem := func(fn http.HandlerFunc) http.Handler { return merchant(idem(fn)) }
+	// Middleware stacks, outermost first. Limits are checked before the work
+	// they protect: the IP limit before authentication, the admin limit
+	// before the token check (so failed guesses count).
+	public := func(fn http.HandlerFunc) http.Handler { return perIP(fn) }
+	merchant := func(fn http.HandlerFunc) http.Handler { return perIP(auth(perMerchant(fn))) }
+	merchantIdem := func(fn http.HandlerFunc) http.Handler { return perIP(auth(perMerchant(idem(fn)))) } // money-moving routes
+	admin := func(fn http.HandlerFunc) http.Handler { return perIP(perAdminIP(requireAdmin(d.AdminToken)(fn))) }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", h.health)
-	mux.HandleFunc("GET /v1/providers", h.listProviders)
+	mux.HandleFunc("GET /healthz", h.health) // never limited: load balancers poll it
+	mux.Handle("GET /v1/providers", public(h.listProviders))
 
 	// Admin
-	mux.Handle("POST /v1/merchants", admin(http.HandlerFunc(h.registerMerchant)))
+	mux.Handle("POST /v1/merchants", admin(h.registerMerchant))
 
 	// Merchant: gateway credentials
-	mux.Handle("GET /v1/gateways", merchant(http.HandlerFunc(h.listGateways)))
-	mux.Handle("PUT /v1/gateways/{provider}", merchant(http.HandlerFunc(h.saveGateway)))
-	mux.Handle("DELETE /v1/gateways/{provider}", merchant(http.HandlerFunc(h.deleteGateway)))
+	mux.Handle("GET /v1/gateways", merchant(h.listGateways))
+	mux.Handle("PUT /v1/gateways/{provider}", merchant(h.saveGateway))
+	mux.Handle("DELETE /v1/gateways/{provider}", merchant(h.deleteGateway))
 
 	// Merchant: payments
 	mux.Handle("POST /v1/payments", merchantIdem(h.createPayment))
-	mux.Handle("GET /v1/payments", merchant(http.HandlerFunc(h.listPayments)))
-	mux.Handle("GET /v1/payments/{id}", merchant(http.HandlerFunc(h.getPayment)))
-	mux.Handle("POST /v1/payments/{id}/sync", merchant(http.HandlerFunc(h.syncPayment)))
+	mux.Handle("GET /v1/payments", merchant(h.listPayments))
+	mux.Handle("GET /v1/payments/{id}", merchant(h.getPayment))
+	mux.Handle("POST /v1/payments/{id}/sync", merchant(h.syncPayment))
 	mux.Handle("POST /v1/payments/{id}/refunds", merchantIdem(h.refundPayment))
 
 	// Merchant: webhooks the hub sent them (inspect, replay dead ones)
-	mux.Handle("GET /v1/webhooks", merchant(http.HandlerFunc(h.listWebhooks)))
-	mux.Handle("GET /v1/webhooks/{id}", merchant(http.HandlerFunc(h.getWebhook)))
-	mux.Handle("POST /v1/webhooks/{id}/replay", merchant(http.HandlerFunc(h.replayWebhook)))
-	mux.Handle("POST /v1/webhooks/replay", merchant(http.HandlerFunc(h.replayDeadWebhooks)))
+	mux.Handle("GET /v1/webhooks", merchant(h.listWebhooks))
+	mux.Handle("GET /v1/webhooks/{id}", merchant(h.getWebhook))
+	mux.Handle("POST /v1/webhooks/{id}/replay", merchant(h.replayWebhook))
+	mux.Handle("POST /v1/webhooks/replay", merchant(h.replayDeadWebhooks))
 
-	// Provider callbacks (authenticated by provider signature)
+	// Provider callbacks (authenticated by provider signature; never limited)
 	mux.HandleFunc("POST /webhooks/{provider}/{merchantID}", h.providerWebhook)
 
 	return chain(mux, recoverer(d.Logger), requestLogger(d.Logger), requestID)

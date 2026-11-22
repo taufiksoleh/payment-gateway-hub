@@ -27,6 +27,7 @@ merchant's own vendor account.
 - Optimistic locking on payments: concurrent webhooks, syncs and refunds never overwrite each other
 - Double-refund protection: the refund amount is reserved before the vendor is called
 - `Idempotency-Key` header on payment and refund creation, so client retries never charge or refund twice
+- Rate limiting per merchant, per client IP and on admin endpoints, with standard `RateLimit-*` headers
 - Plain Go: standard library router, `database/sql`, `log/slog`. One external dependency (pgx)
 
 ## Supported channels
@@ -205,6 +206,19 @@ curl -s -X POST localhost:8080/v1/webhooks/replay        -H "Authorization: Bear
 - **What replay does:** it queues the webhook again within about a second, with a fresh 12 attempts and the **same** event `id` and payload.
 - **Only dead webhooks can be replayed.** Anything else gets `409 invalid_state`. A delivered event would carry an id you have already processed.
 
+### Rate limits
+
+| Limit | Applies to | Default | Env var |
+|---|---|---|---|
+| Per merchant | Every authenticated `/v1` request | 600/min | `RATE_LIMIT_MERCHANT_PER_MIN` |
+| Per client IP | Every `/v1` request, checked **before** authentication | 1200/min | `RATE_LIMIT_IP_PER_MIN` |
+| Admin | `POST /v1/merchants`, per client IP (failed token guesses count) | 10/min | `RATE_LIMIT_ADMIN_PER_MIN` |
+
+- **Bursts:** about 10 seconds' worth of requests can arrive at once (rate ÷ 6, minimum 5). Set a limit to `0` to disable it.
+- **Never limited:** vendor webhooks (`/webhooks/...`), because vendors share IPs across all merchants and throttling them would delay payment updates. Also `/healthz`.
+- **Headers:** every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the bucket is full). Over the limit you get `429 rate_limited` with `Retry-After` in seconds.
+- **Behind a load balancer:** set `TRUST_PROXY=true` so client IPs are read from `X-Forwarded-For` (the last entry, which your proxy appends). Leave it off otherwise, or clients could forge the header to dodge the limit.
+
 ## Project layout
 
 ```
@@ -224,7 +238,7 @@ internal/
   outbox/                transactional outbox: message, store port, retry policy (+ contract test)
   notify/                event encoding, signing, and the dispatcher that delivers the outbox
   idempotency/           Idempotency-Key record + store port (+ contract test)
-  platform/              small utilities: id generation, encryption
+  platform/              small utilities: id generation, encryption, rate limiting
   config/                environment variables
   app/                   composition root: wires everything
 migrations/              SQL files, embedded and applied on startup
@@ -264,4 +278,5 @@ This is a solid foundation, not yet production-certified. Before going live:
 - **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
 - **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
-- **Not yet built:** rate limiting, API key rotation, metrics.
+- **Rate limits are per instance.** Buckets live in memory, so N hub instances allow up to N times each limit. Implement `ratelimit.Limiter` on a shared store (such as Redis) if you need exact global limits.
+- **Not yet built:** API key rotation, metrics.

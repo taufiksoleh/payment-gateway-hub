@@ -184,6 +184,28 @@ id), rather than `OFFSET`:
   rows to know whether another page exists, so `next_cursor` is never set on
   the last page.
 
+**Rate limiting is a token bucket per key, in front of the work it protects.**
+`platform/ratelimit` holds a small, dependency-free token bucket behind a
+`Limiter` interface. `httpapi` stacks it per route:
+
+```
+public:    perIP → handler
+merchant:  perIP → authenticate → perMerchant → handler
+money:     perIP → authenticate → perMerchant → Idempotency-Key → handler
+admin:     perIP → perAdminIP → admin token → handler
+```
+
+- **The IP limit runs before authentication,** so a flood of bad API keys
+  never reaches the database.
+- **The admin limit runs before the token check,** so failed guesses are
+  counted.
+- **Not limited:** vendor webhooks, because many merchants share a vendor's
+  IPs and a 429 there would only delay payment updates. Also `/healthz`.
+- **Memory stays bounded:** buckets that have fully refilled are swept away
+  once a minute.
+- **Buckets are per process.** A shared implementation (such as Redis) can
+  replace it without touching the middleware.
+
 **Domain types have no JSON tags.** Wire formats live in `transport/dto`
 (public API), in each vendor package (vendor API), and in `postgres`
 (storage). Renaming a JSON field never touches business code.
@@ -235,5 +257,6 @@ later, notify.Dispatcher:
 | Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races, a second refund fired while the first is at the vendor, exactly one outbox event per real change | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
 | Dispatcher | Signed delivery, backoff timing, giving up after max attempts, merchants without a URL, the run loop, delivering a replayed dead webhook | memory outbox + `httptest` merchant server + fake clock |
-| HTTP | Routing, auth, error mapping, full flow, Idempotency-Key replay/reuse/in-progress/retry-after-failure | `httptest` + real use cases + memory repos |
+| Rate limiter | Burst then refuse, refill timing, independent keys, sweeping idle buckets, exact counts under 100 concurrent callers | fake clock |
+| HTTP | Routing, auth, error mapping, full flow, Idempotency-Key replay/reuse/in-progress/retry-after-failure, rate limit headers, 429s, limits before auth, exempt routes, X-Forwarded-For trust | `httptest` + real use cases + memory repos |
 | Storage | SQL correctness, migrations, optimistic locks, outbox atomicity (a losing update writes no event), the payment-list, idempotency, outbox and webhook-repository contracts | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |

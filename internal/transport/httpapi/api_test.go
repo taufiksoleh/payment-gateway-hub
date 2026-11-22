@@ -40,7 +40,9 @@ type testServer struct {
 	outbox *memory.Outbox
 }
 
-func newTestServer(t *testing.T) *testServer {
+// newTestServer builds a server; opts may adjust its dependencies (e.g. add
+// rate limits) before the router is built.
+func newTestServer(t *testing.T, opts ...func(*httpapi.Deps)) *testServer {
 	t.Helper()
 	fake := gatewaytest.New("fake")
 	registry := gateway.NewRegistry(fake)
@@ -49,7 +51,7 @@ func newTestServer(t *testing.T) *testServer {
 	ob := memory.NewOutbox(notify.EncodeEvent)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
+	deps := httpapi.Deps{
 		Merchants: usecase.NewMerchantService(merchantRepo, credRepo, registry),
 		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
 			Payments: memory.NewPaymentRepo(ob),
@@ -62,7 +64,11 @@ func newTestServer(t *testing.T) *testServer {
 		AdminToken:  adminToken,
 		Idempotency: memory.NewIdempotencyStore(),
 		Logger:      log,
-	}))
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	srv := httptest.NewServer(httpapi.NewRouter(deps))
 	t.Cleanup(srv.Close)
 	return &testServer{Server: srv, fake: fake, outbox: ob}
 }
