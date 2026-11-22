@@ -37,6 +37,7 @@ These hold for every step and decide what we do *not* build.
 | 4 | "Fees eat my margin" | Fee tables, cost-aware routing, QRIS zero-MDR routing | M |
 | 5 | "Integration takes too long" | OpenAPI spec, SDKs, e-commerce plugins, merchant dashboard | L |
 | 6 | "Am I compliant?" | PDP data retention and erasure, audit log, SNAP readiness, KMS | M |
+| Console | "I'm not a developer; I just want to see my payments" | [Web console](#web-console) for merchants and operators, in three milestones alongside the phases | L |
 | — | "My gateway isn't supported" | More adapters, as demand appears | S each |
 
 Phases 1 and 2 are the core value of a hub: a single gateway can't fail over
@@ -171,7 +172,7 @@ payments to the cheapest option leave money on the table.
 | **OpenAPI 3 spec** and generated docs ✅ | Done: [docs/api/openapi.yaml](api/openapi.yaml), served at `/docs`, kept in step with the code by tests. Postman and Insomnia import the document directly |
 | **SDKs:** PHP first, then Node.js, Go and Python | PHP (Laravel) is common among Indonesian SMB stacks. Each SDK includes webhook signature verification |
 | **Plugins:** WooCommerce, then Laravel | Lets non-developers adopt the hub |
-| **Merchant dashboard** | Payments, refunds, webhook deliveries and replay, API keys, gateway credentials, routing rules, reconciliation. Built on the existing API, with no private endpoints |
+| **Web console** | See [Web console](#web-console) below |
 | **Test mode** | The `dev/` mock providers become a first-class sandbox, so merchants can simulate paid, expired and failed payments without vendor sandbox accounts |
 
 ## Phase 6: compliance and trust
@@ -184,6 +185,110 @@ payments to the cheapest option leave money on the table.
 | **Key management** | Move `ENCRYPTION_KEY` to a KMS (AWS KMS, GCP KMS or Vault) with key rotation |
 | **SNAP readiness** | Bank Indonesia's open API payment standard (SNAP) governs VA, direct debit and e-wallet APIs. Gateways such as DOKU publish SNAP migration guides. Adapters should target each gateway's SNAP endpoints as they become the default, without changing the hub's own API |
 | **Admin roles** | Replace the single admin token with named admin users and scoped permissions |
+
+## Web console
+
+**Problem.** Today everything is done with `curl`. The people who run a shop
+day to day (owners, finance, customer support) need to look up a payment,
+issue a refund or check why a webhook failed without writing code. Operators
+running the hub need to onboard merchants and see its health at a glance.
+
+**Two consoles, one app.**
+- **Merchant console:** each merchant sees and manages only its own account.
+- **Operator console:** for whoever runs the hub. It handles merchant
+  onboarding, system health and support. It replaces the single admin token
+  with named operator accounts.
+
+### Milestones
+
+The console grows with the API; each milestone uses only features that
+already exist when it starts.
+
+| Milestone | When | Pages |
+|---|---|---|
+| **C1: see and act** | Now; the API is ready | Overview, payments (search, detail, refund, sync), webhooks (deliveries, payload, replay), gateways (connect wizard), API keys, settings, team |
+| **C2: routing and money** | With Phases 1–2 | Provider health, routing rules editor, reconciliation (matched, pending, mismatched), settlement uploads, CSV exports |
+| **C3: grow and comply** | With Phases 3, 4 and 6 | Payment links, checkout branding, fee tables and fee report, audit log, customer data export and erasure |
+
+### C1 pages
+
+| Page | What it shows and does |
+|---|---|
+| **Overview** | Today and this month: volume, count, success rate per provider and method, failure reasons, pending refunds, dead webhooks. Each tile links to the filtered list |
+| **Payments** | Search by order id, filter like `GET /v1/payments`. Detail view: status timeline, customer, payment instructions, vendor reference, webhooks sent. **Refund** and **Sync** buttons (owner and finance roles only) |
+| **Webhooks** | Deliveries with status, attempts and last error. Exact payload. **Replay** one, or every dead one |
+| **Gateways** | One connect wizard per vendor, linked to the [setup guides](providers/README.md): paste keys, copy the notification URL, **Test connection**. Secrets are never shown again |
+| **API keys** | Rotate with a chosen grace period, revoke, see last use. A new key is shown once, with a copy button |
+| **Settings** | Webhook URL, webhook secret rotation, `require_idempotency_key` |
+| **Team** | Invite by email, assign roles, remove members |
+
+### Design
+
+- **Plain Go, no build step.**
+  - **Rendering:** pages are server-rendered with `html/template`, with
+    [htmx](https://htmx.org) for partial updates.
+  - **Packaging:** embedded in the hub binary with `go:embed`, served at
+    `/console`. No Node toolchain, which matches how the rest of the project is
+    built and keeps it hand-maintainable.
+- **Same use cases as the API.** Console handlers call the existing
+  `usecase` services through the same ports, so a refund from the console
+  follows the same reservation, idempotency and reconciliation rules as one
+  from the API. Every action the console offers is also available in the
+  public API.
+- **People log in; programs use API keys.**
+  - **Login:** console users with email and password, hashed with argon2id,
+    plus TOTP two-factor (required for owners and operators).
+  - **Sessions:** server-side sessions in Postgres behind an `HttpOnly`,
+    `Secure`, `SameSite=Strict` cookie, with CSRF tokens on every form.
+  - **Brute-force limits:** login attempts are rate limited per account and
+    per IP.
+- **Roles.**
+
+  | Role | Can |
+  |---|---|
+  | Owner | Everything, including team, gateways and API keys |
+  | Developer | Gateways, API keys, webhooks, settings |
+  | Finance | Payments, refunds, reconciliation, exports |
+  | Viewer | Read-only; customer contact details masked |
+
+- **Personal data.** Lists mask customer email and phone (`bu***@gmail.com`);
+  full details appear only on a payment's page, and every view of them is
+  written to the audit log. This follows the PDP work in Phase 6.
+- **Deployment.**
+  - **Switch:** `CONSOLE_ENABLED`, on by default.
+  - **Separate address:** the console can be served on its own listener
+    (`CONSOLE_ADDR`), so it can sit behind a VPN or SSO proxy while the API
+    stays public.
+  - **Security headers:** a strict Content-Security-Policy, with no
+    third-party scripts at runtime.
+
+### New API and storage it needs
+
+| Need | For |
+|---|---|
+| `GET /v1/stats?from=&to=&group_by=provider,method,status` | Overview tiles, and useful to API users too |
+| `GET /v1/payments/{id}/events` | The status timeline (from the events already written to the outbox) |
+| `PATCH /v1/settings` with `webhook_url`; `POST /v1/settings/webhook-secret/rotate` | Settings page |
+| `POST /v1/gateways/{provider}/test` | **Test connection**: a harmless authenticated call to the vendor |
+| `console_users`, `memberships`, `sessions`, `invites` tables | Login, teams, roles |
+| Audit log (Phase 6, moved earlier) | Who refunded, rotated a key or changed credentials |
+
+### Order of work
+
+1. **Accounts and access:** console users, sessions, roles and audit log,
+   since every page depends on them.
+2. **C1 pages:** payments and webhooks first (what support asks about most),
+   then gateways, keys, settings and team.
+3. **Overview page,** once `/v1/stats` exists.
+4. **Operator console:** merchant list and onboarding, provider health, outbox
+   backlog, then retire `ADMIN_TOKEN` for named operators.
+
+**Risks.**
+- **Account takeover** now exposes refunds to a password. Mitigations: 2FA,
+  role checks on every action, refund confirmation showing amount and order,
+  and alerts on new logins and key rotations.
+- **Scope creep** into a general admin panel. Each page must map to a merchant
+  problem in this roadmap.
 
 ## More gateways
 
@@ -213,4 +318,5 @@ in depth.
 - [Juspay: payment orchestration in 2026](https://juspay.io/blog/why-global-merchants-can-t-afford-to-ignore-payment-orchestration-in-2026)
 - [Hyperswitch (open-source orchestration, for comparison)](https://github.com/juspay/hyperswitch)
 - [Rajah & Tann: Indonesia PDP law updates](https://www.rajahtannasia.com/viewpoints/indonesias-pdp-law-updates-dpa-u-s-trade‑related-data-transfers-and-recent-court-rulings/)
+- [htmx](https://htmx.org)
 - [RSM: PP 33/2026 implementation priorities](https://www.rsm.global/indonesia/sites/default/files/media/publications/Client%20Alert/2026/RSM%20Indonesia%20Client%20Alert%20%20-%20PP%20332026%20Six%20Implementation%20Priorities%20before%2016%20January%202027.pdf)
