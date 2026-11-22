@@ -52,6 +52,10 @@ type Deps struct {
 	Idempotency idempotency.Store
 	RateLimits  RateLimits // zero value: no limits
 	Logger      *slog.Logger
+
+	// Instrument, if set, wraps the route table directly, where r.Pattern
+	// (the matched route) is available. Used for metrics.
+	Instrument func(http.Handler) http.Handler
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -99,7 +103,11 @@ func NewRouter(d Deps) http.Handler {
 	// Provider callbacks, authenticated by the provider's signature.
 	mux.HandleFunc("POST /webhooks/{provider}/{merchantID}", h.providerWebhook)
 
-	return chain(mux, recoverer(d.Logger), requestLogger(d.Logger), requestID)
+	instrument := d.Instrument
+	if instrument == nil {
+		instrument = func(h http.Handler) http.Handler { return h }
+	}
+	return chain(mux, recoverer(d.Logger), instrument, requestLogger(d.Logger), requestID)
 }
 
 type handlers struct {

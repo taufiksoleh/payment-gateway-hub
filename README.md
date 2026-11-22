@@ -29,6 +29,7 @@ merchant's own vendor account.
 - `Idempotency-Key` header on payment and refund creation, so client retries never charge or refund twice
 - Rate limiting per merchant, per client IP and on admin endpoints, with standard `RateLimit-*` headers
 - API key rotation without downtime: old keys keep working through a grace period
+- Prometheus metrics on a separate port: HTTP, providers, payments, webhook delivery and backlog, rate limits
 - Plain Go: standard library router, `database/sql`, `log/slog`. One external dependency (pgx)
 
 ## Supported channels
@@ -68,6 +69,7 @@ The demo exits non-zero if any step fails, so it also works as a smoke test.
 | Service | URL | Role |
 |---|---|---|
 | `hub` | http://localhost:8080 | The API. Admin token: `dev-admin-token` |
+| `hub` metrics | http://localhost:9090/metrics | Prometheus metrics |
 | `postgres` | localhost:5432 (`hub`/`hub`) | Its database |
 | `mock-midtrans` | http://localhost:8081 | Fake Midtrans API (`dev/mockmidtrans`) |
 | `webhook-sink` | http://localhost:8090/events | Fake merchant endpoint that logs and verifies webhooks (`dev/webhooksink`) |
@@ -307,6 +309,45 @@ curl -s -X DELETE localhost:8080/v1/api-keys/key_... -H "Authorization: Bearer $
 - **Headers:** every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the bucket is full). Over the limit you get `429 rate_limited` with `Retry-After` in seconds.
 - **Behind a load balancer:** set `TRUST_PROXY=true` so client IPs are read from `X-Forwarded-For` (the last entry, which your proxy appends). Leave it off otherwise, or clients could forge the header to dodge the limit.
 
+### Metrics
+
+Prometheus metrics are served at `GET /metrics` on `METRICS_ADDR` (default
+`:9090`). That's a separate listener, so the public API port never exposes
+them; keep 9090 on your internal network. Set `METRICS_ADDR=off` to disable.
+
+| Metric | Labels | Use it for |
+|---|---|---|
+| `hub_http_requests_total` / `hub_http_request_duration_seconds` | `route` (pattern), `status` | Traffic, error rate, latency per endpoint |
+| `hub_provider_requests_total` / `hub_provider_request_duration_seconds` | `provider`, `operation`, `outcome` | Provider outages and slowness |
+| `hub_provider_webhooks_total` | `provider`, `outcome` | Notifications received; `invalid_signature` spikes mean misconfigured keys |
+| `hub_payments_created_total` | `provider`, `method` | Payment volume |
+| `hub_payment_events_total` | `provider`, `type` | Status changes (`payment.paid`, `payment.refunded`, …) |
+| `hub_webhook_deliveries_total` | `outcome` (`delivered`, `failed`, `dead`) | Merchant webhook health |
+| `hub_webhook_outbox_messages` | `state` (`pending`, `dead`) | Backlog size |
+| `hub_webhook_outbox_oldest_pending_seconds` | — | **Alert on this:** if it keeps growing, delivery is stuck |
+| `hub_rate_limited_requests_total` | `scope` (`ip`, `merchant`, `admin`) | Throttled clients, brute-force attempts |
+
+Standard `go_*` metrics are always exported; `process_*` metrics too, on Linux.
+
+The `outcome` label takes these values:
+
+| Value | Meaning |
+|---|---|
+| `ok` | Success |
+| `provider_error` | The provider answered with an error |
+| `rejected` | The hub refused the request before calling the provider |
+| `invalid_signature` | A notification's signature didn't verify |
+| `ignored` | A valid notification for an event the hub doesn't act on |
+| `error` | Any other failure |
+
+Starting alert rules:
+
+| Alert on | Meaning |
+|---|---|
+| `hub_webhook_outbox_oldest_pending_seconds > 600` | Merchant webhook delivery is stuck |
+| `rate(hub_provider_requests_total{outcome="provider_error"}[5m])` rising | A provider is failing |
+| `increase(hub_webhook_deliveries_total{outcome="dead"}[1h]) > 0` | Merchants missed events; they can replay them via `/v1/webhooks` |
+
 ## Project layout
 
 ```
@@ -325,6 +366,7 @@ internal/
     dto/                 public JSON shapes (API + outbound webhooks)
   outbox/                transactional outbox: message, store port, retry policy (+ contract test)
   notify/                event encoding, signing, and the dispatcher that delivers the outbox
+  metrics/               Prometheus metrics, applied as decorators by app
   idempotency/           Idempotency-Key record + store port (+ contract test)
   platform/              small utilities: id generation, encryption, rate limiting
   config/                environment variables

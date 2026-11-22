@@ -21,6 +21,7 @@ func NewOutboxStore(db *sql.DB) *OutboxStore {
 
 var (
 	_ outbox.Store              = (*OutboxStore)(nil)
+	_ outbox.BacklogReporter    = (*OutboxStore)(nil)
 	_ usecase.WebhookRepository = (*OutboxStore)(nil)
 )
 
@@ -187,4 +188,24 @@ func scanDelivery(s scanner, extra ...any) (*outbox.Delivery, error) {
 	d.DeliveredAt = timePtr(deliveredAt)
 	d.DeadAt = timePtr(deadAt)
 	return &d, nil
+}
+
+// Backlog uses the partial indexes on pending and dead rows, so it stays
+// cheap however many delivered rows the table holds.
+func (s *OutboxStore) Backlog(ctx context.Context) (outbox.Backlog, error) {
+	var (
+		b      outbox.Backlog
+		oldest sql.NullTime
+	)
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*), min(created_at) FROM webhook_outbox
+		WHERE delivered_at IS NULL AND dead_at IS NULL`).Scan(&b.Pending, &oldest); err != nil {
+		return b, err
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM webhook_outbox WHERE dead_at IS NOT NULL`).Scan(&b.Dead); err != nil {
+		return b, err
+	}
+	b.OldestPendingAt = oldest.Time
+	return b, nil
 }

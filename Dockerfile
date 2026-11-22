@@ -29,7 +29,7 @@ ENTRYPOINT ["/demo"]
 # Production image
 FROM gcr.io/distroless/static-debian12:nonroot AS hub
 COPY --from=build /out/hub /hub
-EXPOSE 8080
+EXPOSE 8080 9090
 USER nonroot:nonroot
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/hub", "-healthcheck"]
 ENTRYPOINT ["/hub"]

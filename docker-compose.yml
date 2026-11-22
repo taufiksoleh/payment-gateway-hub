@@ -1,6 +1,7 @@
 # Local stack: `make up`, then `make demo`.
 #
 #   hub            the API                 http://localhost:8080
+#                  Prometheus metrics      http://localhost:9090/metrics
 #   postgres       its database            localhost:5432
 #   mock-midtrans  fake Midtrans API       http://localhost:8081
 #   webhook-sink   fake merchant endpoint  http://localhost:8090/events
@@ -44,6 +45,7 @@ services:
       DOKU_SANDBOX_URL: ${DOKU_SANDBOX_URL:-}
     ports:
       - "${HUB_PORT:-8080}:8080"
+      - "${METRICS_PORT:-9090}:9090"
     healthcheck:
       test: ["CMD", "/hub", "-healthcheck"]
       interval: 2s

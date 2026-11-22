@@ -148,6 +148,10 @@ func TestRepositories(t *testing.T) {
 		outboxtest.RunStoreContract(t, postgres.NewOutboxStore(db), m.ID, p.ID)
 	})
 
+	t.Run("outbox backlog contract", func(t *testing.T) {
+		outboxtest.RunBacklogContract(t, postgres.NewOutboxStore(db), m.ID, p.ID)
+	})
+
 	t.Run("webhook repository contract", func(t *testing.T) {
 		// Two fresh merchants with one payment each and no webhooks yet.
 		account := func(name string) outboxtest.Account {

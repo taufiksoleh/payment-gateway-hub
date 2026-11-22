@@ -17,6 +17,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/midtrans"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/xendit"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/metrics"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/ratelimit"
@@ -29,28 +30,30 @@ import (
 )
 
 type App struct {
-	cfg        config.Config
-	log        *slog.Logger
-	server     *http.Server
-	dispatcher *notify.Dispatcher
-	repos      *repositories
-	db         *sql.DB // nil with in-memory storage
+	cfg           config.Config
+	log           *slog.Logger
+	server        *http.Server
+	metricsServer *http.Server // nil when METRICS_ADDR=off
+	dispatcher    *notify.Dispatcher
+	repos         *repositories
+	db            *sql.DB // nil with in-memory storage
 }
 
 func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error) {
 	a := &App{cfg: cfg, log: log}
+	m := metrics.New()
 
 	providerClient := gateway.DefaultHTTPClient()
 	gateways := gateway.NewRegistry(
-		midtrans.New(midtrans.Options{
+		m.Gateway(midtrans.New(midtrans.Options{
 			HTTPClient: providerClient,
 			Endpoints:  gateway.Endpoints{Sandbox: cfg.MidtransSandboxURL},
-		}),
-		xendit.New(xendit.Options{HTTPClient: providerClient, BaseURL: cfg.XenditBaseURL}),
-		doku.New(doku.Options{
+		})),
+		m.Gateway(xendit.New(xendit.Options{HTTPClient: providerClient, BaseURL: cfg.XenditBaseURL})),
+		m.Gateway(doku.New(doku.Options{
 			HTTPClient: providerClient,
 			Endpoints:  gateway.Endpoints{Sandbox: cfg.DOKUSandboxURL},
-		}),
+		})),
 	)
 
 	repos, err := a.openStorage(ctx)
@@ -58,11 +61,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		return nil, err
 	}
 	a.repos = repos
-	a.dispatcher = notify.NewDispatcher(repos.outbox, repos.merchants, notify.NewSender(nil), log)
+	if br, ok := repos.outbox.(outbox.BacklogReporter); ok {
+		m.WatchBacklog(br, time.Now)
+	}
+	a.dispatcher = notify.NewDispatcher(m.Outbox(repos.outbox), repos.merchants, notify.NewSender(nil), log)
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
-			Payments: repos.payments,
+			Payments: m.Payments(repos.payments),
 			Creds:    repos.creds,
 			Gateways: gateways,
 			Logger:   log,
@@ -77,8 +83,9 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Providers:   gateways.Providers(),
 		AdminToken:  cfg.AdminToken,
 		Idempotency: repos.idempotency,
-		RateLimits:  rateLimits(cfg),
+		RateLimits:  rateLimits(cfg, m),
 		Logger:      log,
+		Instrument:  m.HTTP,
 	})
 
 	a.server = &http.Server{
@@ -88,6 +95,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second, // provider calls can be slow
 		IdleTimeout:       120 * time.Second,
+	}
+
+	if cfg.MetricsAddr != "off" {
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", m.Handler())
+		a.metricsServer = &http.Server{Addr: cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	}
 	return a, nil
 }
@@ -155,11 +168,17 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 	go a.housekeeping(ctx)
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		a.log.Info("http server listening", "addr", a.cfg.HTTPAddr)
 		errCh <- a.server.ListenAndServe()
 	}()
+	if a.metricsServer != nil {
+		go func() {
+			a.log.Info("metrics server listening", "addr", a.cfg.MetricsAddr)
+			errCh <- a.metricsServer.ListenAndServe()
+		}()
+	}
 
 	select {
 	case err := <-errCh:
@@ -175,6 +194,9 @@ func (a *App) Run(ctx context.Context) error {
 	defer cancel()
 
 	err := a.server.Shutdown(shutdownCtx)
+	if a.metricsServer != nil {
+		_ = a.metricsServer.Shutdown(shutdownCtx)
+	}
 	select { // undelivered webhooks stay in the outbox for the next start
 	case <-dispatcherDone:
 	case <-shutdownCtx.Done():
@@ -218,17 +240,17 @@ func (a *App) purge(ctx context.Context, what string, fn func() (int64, error)) 
 	}
 }
 
-func rateLimits(cfg config.Config) httpapi.RateLimits {
-	limiter := func(perMinute int) ratelimit.Limiter {
+func rateLimits(cfg config.Config, m *metrics.Metrics) httpapi.RateLimits {
+	limiter := func(perMinute int, scope string) ratelimit.Limiter {
 		if perMinute == 0 {
 			return nil // disabled
 		}
-		return ratelimit.NewTokenBucket(perMinute, ratelimit.BurstFor(perMinute))
+		return m.Limiter(ratelimit.NewTokenBucket(perMinute, ratelimit.BurstFor(perMinute)), scope)
 	}
 	return httpapi.RateLimits{
-		PerIP:       limiter(cfg.RateLimitIPPerMin),
-		PerMerchant: limiter(cfg.RateLimitMerchantPerMin),
-		Admin:       limiter(cfg.RateLimitAdminPerMin),
+		PerIP:       limiter(cfg.RateLimitIPPerMin, "ip"),
+		PerMerchant: limiter(cfg.RateLimitMerchantPerMin, "merchant"),
+		Admin:       limiter(cfg.RateLimitAdminPerMin, "admin"),
 		TrustProxy:  cfg.TrustProxy,
 	}
 }

@@ -15,6 +15,7 @@ import (
 // var name and default are noted per field.
 type Config struct {
 	HTTPAddr        string        // HTTP_ADDR, ":8080"
+	MetricsAddr     string        // METRICS_ADDR, ":9090"; "off" disables
 	DatabaseURL     string        // DATABASE_URL, empty selects in-memory storage
 	DBMaxOpenConns  int           // DB_MAX_OPEN_CONNS, 20
 	DBMaxIdleConns  int           // DB_MAX_IDLE_CONNS, 5
@@ -39,6 +40,7 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:      getEnv("HTTP_ADDR", ":8080"),
+		MetricsAddr:   getEnv("METRICS_ADDR", ":9090"),
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 		AdminToken:    os.Getenv("ADMIN_TOKEN"),

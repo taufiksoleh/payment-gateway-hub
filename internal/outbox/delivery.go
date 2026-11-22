@@ -1,6 +1,9 @@
 package outbox
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Status string
 
@@ -39,4 +42,16 @@ type ListFilter struct {
 	Status Status // empty: any
 	Limit  int
 	Cursor string // id of the last item on the previous page
+}
+
+// Backlog summarizes undelivered messages, for monitoring.
+type Backlog struct {
+	Pending         int64
+	Dead            int64
+	OldestPendingAt time.Time // zero when nothing is pending
+}
+
+// BacklogReporter is implemented by stores that can report their backlog.
+type BacklogReporter interface {
+	Backlog(ctx context.Context) (Backlog, error)
 }

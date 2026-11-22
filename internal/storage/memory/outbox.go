@@ -36,6 +36,7 @@ func NewOutbox(encode outbox.Encoder) *Outbox {
 
 var (
 	_ outbox.Store              = (*Outbox)(nil)
+	_ outbox.BacklogReporter    = (*Outbox)(nil)
 	_ usecase.WebhookRepository = (*Outbox)(nil)
 )
 
@@ -229,4 +230,22 @@ func (e *outboxEntry) delivery() outbox.Delivery {
 		d.DeadAt = &t
 	}
 	return d
+}
+
+func (o *Outbox) Backlog(_ context.Context) (outbox.Backlog, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var b outbox.Backlog
+	for _, e := range o.entries {
+		switch {
+		case !e.deadAt.IsZero():
+			b.Dead++
+		case e.deliveredAt.IsZero():
+			b.Pending++
+			if b.OldestPendingAt.IsZero() || e.msg.CreatedAt.Before(b.OldestPendingAt) {
+				b.OldestPendingAt = e.msg.CreatedAt
+			}
+		}
+	}
+	return b, nil
 }

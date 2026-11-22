@@ -164,3 +164,44 @@ func RunStoreContract(t *testing.T, store Store, merchantID, paymentID string) {
 		}
 	})
 }
+
+// BacklogStore can also report its backlog.
+type BacklogStore interface {
+	Store
+	outbox.BacklogReporter
+}
+
+// RunBacklogContract checks Backlog by comparing counts before and after
+// adding messages, so rows left by other tests do not matter.
+func RunBacklogContract(t *testing.T, store BacklogStore, merchantID, paymentID string) {
+	ctx := context.Background()
+	before, err := store.Backlog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := time.Now().UTC().Add(-100 * 365 * 24 * time.Hour).Truncate(time.Microsecond)
+	msgs := make([]outbox.Message, 3)
+	for i := range msgs {
+		msgs[i] = outbox.Message{
+			ID: id.New("evt"), MerchantID: merchantID, PaymentID: paymentID,
+			Type: "payment.paid", Payload: []byte(`{}`), CreatedAt: old.Add(time.Duration(i) * time.Second),
+		}
+	}
+	if err := store.Enqueue(ctx, msgs...); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.MarkDelivered(ctx, msgs[1].ID, old)
+	_ = store.MarkDead(ctx, msgs[2].ID, outbox.MaxAttempts, "gave up", old)
+
+	after, err := store.Backlog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Pending-before.Pending != 1 || after.Dead-before.Dead != 1 {
+		t.Fatalf("pending +%d, dead +%d; want +1 each", after.Pending-before.Pending, after.Dead-before.Dead)
+	}
+	if !after.OldestPendingAt.Equal(old) {
+		t.Fatalf("oldest pending = %v, want %v", after.OldestPendingAt, old)
+	}
+}

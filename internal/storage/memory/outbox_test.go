@@ -18,3 +18,7 @@ func TestOutbox_WebhookRepositoryContract(t *testing.T) {
 		outboxtest.Account{MerchantID: "mch_b", PaymentID: "pay_b"},
 	)
 }
+
+func TestOutbox_BacklogContract(t *testing.T) {
+	outboxtest.RunBacklogContract(t, memory.NewOutbox(notify.EncodeEvent), "mch_test", "pay_test")
+}

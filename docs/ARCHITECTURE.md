@@ -225,6 +225,24 @@ admin:     perIP → perAdminIP → admin token → handler
 - **Buckets are per process.** A shared implementation (such as Redis) can
   replace it without touching the middleware.
 
+**Metrics are decorators.** `internal/metrics` wraps existing interfaces
+instead of adding calls to business code, and `internal/app` applies the
+wrappers:
+
+| Wrapped piece | Metrics it produces |
+|---|---|
+| The route table (`httpapi.Deps.Instrument`) | Requests per route pattern |
+| Each `gateway.Gateway` | Provider calls and incoming webhooks |
+| The `PaymentRepository` | Created payments and saved events, counted only on a successful save |
+| The `outbox.Store` | Delivery outcomes |
+| Each `ratelimit.Limiter` | Rejections |
+
+- **Refund support preserved:** the gateway wrapper implements
+  `gateway.Refunder` only when the adapter it wraps does, so the use case's
+  refund check is unchanged.
+- **Backlog gauges:** read on each scrape through `outbox.BacklogReporter`,
+  using the partial indexes on pending and dead rows.
+
 **Domain types have no JSON tags.** Wire formats live in `transport/dto`
 (public API), in each vendor package (vendor API), and in `postgres`
 (storage). Renaming a JSON field never touches business code.
