@@ -309,6 +309,38 @@ curl -s -X DELETE localhost:8080/v1/api-keys/key_... -H "Authorization: Bearer $
 - **Headers:** every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the bucket is full). Over the limit you get `429 rate_limited` with `Retry-After` in seconds.
 - **Behind a load balancer:** set `TRUST_PROXY=true` so client IPs are read from `X-Forwarded-For` (the last entry, which your proxy appends). Leave it off otherwise, or clients could forge the header to dodge the limit.
 
+### Logging
+
+Logs are JSON on stdout. Every line written while handling a request carries
+its `request_id` (taken from `X-Request-Id`, or generated and returned in that
+header) and, once the API key is checked, its `merchant_id`. Grep one ID to
+see everything a request did.
+
+Each request ends with one `http request` line:
+
+| Field | Content |
+|---|---|
+| `method`, `route`, `path` | `route` is the matched pattern, e.g. `GET /v1/payments/{id}` |
+| `query` | Query parameters |
+| `status`, `bytes`, `duration_ms` | The response |
+| `error` | Why the request failed, for any 4xx or 5xx |
+| `stack` | For 5xx responses and panics only. A panic's stack starts where it panicked |
+
+The level follows the status: `INFO` below 400, `WARN` for 4xx, `ERROR` for
+5xx.
+
+Each call to Midtrans, Xendit or DOKU logs a `provider call` line with the same
+`request_id`: method, host, path, status and duration.
+
+With `LOG_LEVEL=debug`, both line types also include `request_body` and
+`response_body`.
+
+Secrets are always redacted: any field or query parameter whose name contains
+`key`, `secret`, `token`, `password`, `signature`, `authorization`, `cvv`, `cvn` or
+`card_number` is logged as `[REDACTED]`, and headers are never logged.
+Customer names, emails and phone numbers are not redacted, so don't run debug
+logging in production.
+
 ### Metrics
 
 Prometheus metrics are served at `GET /metrics` on `METRICS_ADDR` (default

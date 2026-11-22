@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/logging"
 )
 
 const maxRequestBytes = 1 << 20
@@ -37,16 +37,16 @@ func writeProblem(w http.ResponseWriter, status int, code, field, message string
 	writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Field: field, Message: message}})
 }
 
-// writeError maps domain errors to HTTP responses.
-func writeError(w http.ResponseWriter, err error) {
-	status, code := http.StatusInternalServerError, "internal_error"
+// writeError maps domain errors to HTTP responses and records err for the
+// request log, with a stack when the failure is the hub's or a provider's.
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
+	status, code, field := http.StatusInternalServerError, "internal_error", ""
 	msg := "internal server error"
 
 	var verr *domain.ValidationError
 	switch {
 	case errors.As(err, &verr):
-		writeProblem(w, http.StatusUnprocessableEntity, "invalid_input", verr.Field, verr.Message)
-		return
+		status, code, field, msg = http.StatusUnprocessableEntity, "invalid_input", verr.Field, verr.Message
 	case errors.Is(err, domain.ErrInvalidInput):
 		status, code, msg = http.StatusUnprocessableEntity, "invalid_input", err.Error()
 	case errors.Is(err, domain.ErrNotFound):
@@ -65,10 +65,13 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code, msg = http.StatusUnprocessableEntity, "unsupported", err.Error()
 	case errors.Is(err, domain.ErrProvider):
 		status, code, msg = http.StatusBadGateway, "provider_error", err.Error()
-	default:
-		slog.Error("unhandled error", "error", err)
 	}
-	writeProblem(w, status, code, "", msg)
+	var stack []string
+	if status >= http.StatusInternalServerError {
+		stack = logging.Stack(1)
+	}
+	recordError(r.Context(), err, stack)
+	writeProblem(w, status, code, field, msg)
 }
 
 // decodeJSON rejects unknown fields so client typos fail loudly.

@@ -59,7 +59,7 @@ type Deps struct {
 }
 
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{payments: d.Payments, merchants: d.Merchants, webhooks: d.Webhooks, providers: d.Providers, log: d.Logger}
+	h := &handlers{payments: d.Payments, merchants: d.Merchants, webhooks: d.Webhooks, providers: d.Providers}
 	ip := clientIP(d.RateLimits.TrustProxy)
 	perIP := rateLimit(d.RateLimits.PerIP, "ip", ip)
 	perMerchant := rateLimit(d.RateLimits.PerMerchant, "merchant", merchantKey)
@@ -107,7 +107,7 @@ func NewRouter(d Deps) http.Handler {
 	if instrument == nil {
 		instrument = func(h http.Handler) http.Handler { return h }
 	}
-	return chain(mux, recoverer(d.Logger), instrument, requestLogger(d.Logger), requestID)
+	return chain(mux, recoverer, instrument, requestLogger(d.Logger), requestID)
 }
 
 type handlers struct {
@@ -115,7 +115,6 @@ type handlers struct {
 	merchants MerchantUsecase
 	webhooks  WebhookUsecase
 	providers []domain.Provider
-	log       *slog.Logger
 }
 
 func (h *handlers) health(w http.ResponseWriter, _ *http.Request) {

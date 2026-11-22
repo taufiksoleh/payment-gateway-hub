@@ -47,7 +47,7 @@ type issuedKeyResponse struct {
 func (h *handlers) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := h.merchants.ListAPIKeys(r.Context(), merchantFrom(r.Context()).ID)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	now, current := time.Now(), apiKeyIDFrom(r.Context())
@@ -69,7 +69,7 @@ type rotateResponse struct {
 func (h *handlers) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req rotateRequest
 	if err := decodeOptionalJSON(r, &req); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	grace := usecase.DefaultRotationGrace
@@ -79,7 +79,7 @@ func (h *handlers) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	issued, err := h.merchants.RotateAPIKey(r.Context(), merchantFrom(r.Context()).ID, grace)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, rotateResponse{
@@ -94,7 +94,7 @@ func (h *handlers) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 // DELETE /v1/api-keys/{id}
 func (h *handlers) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	if err := h.merchants.RevokeAPIKey(r.Context(), merchantFrom(r.Context()).ID, r.PathValue("id")); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -113,12 +113,12 @@ type issueKeyResponse struct {
 func (h *handlers) issueAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req issueKeyRequest
 	if err := decodeOptionalJSON(r, &req); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	issued, revoked, err := h.merchants.IssueAPIKey(r.Context(), r.PathValue("id"), req.RevokeExisting)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, issueKeyResponse{

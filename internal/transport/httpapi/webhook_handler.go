@@ -55,7 +55,7 @@ func (h *handlers) listWebhooks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, err := queryInt(q, "limit")
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	page, err := h.webhooks.List(r.Context(), merchantFrom(r.Context()).ID, usecase.ListWebhooksInput{
@@ -64,7 +64,7 @@ func (h *handlers) listWebhooks(w http.ResponseWriter, r *http.Request) {
 		Cursor: q.Get("cursor"),
 	})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, webhookListResponse{
@@ -77,7 +77,7 @@ func (h *handlers) listWebhooks(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) getWebhook(w http.ResponseWriter, r *http.Request) {
 	d, err := h.webhooks.Get(r.Context(), merchantFrom(r.Context()).ID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toWebhookResponse(*d))
@@ -87,7 +87,7 @@ func (h *handlers) getWebhook(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) replayWebhook(w http.ResponseWriter, r *http.Request) {
 	d, err := h.webhooks.Replay(r.Context(), merchantFrom(r.Context()).ID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toWebhookResponse(*d))
@@ -97,7 +97,7 @@ func (h *handlers) replayWebhook(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) replayDeadWebhooks(w http.ResponseWriter, r *http.Request) {
 	n, err := h.webhooks.ReplayAllDead(r.Context(), merchantFrom(r.Context()).ID)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"replayed": n})

@@ -41,23 +41,27 @@ func raw(t *testing.T, srv *testServer, method, path string, headers map[string]
 	return response{status: resp.StatusCode, header: resp.Header, body: body}
 }
 
+type registeredMerchant struct {
+	ID            string `json:"id"`
+	APIKey        string `json:"api_key"`
+	WebhookSecret string `json:"webhook_secret"`
+}
+
 // registerMerchant uses only the admin route, so no merchant quota is spent.
-func registerMerchant(t *testing.T, ts *testServer, name string) string {
+func registerMerchant(t *testing.T, ts *testServer, name string) registeredMerchant {
 	t.Helper()
-	var m struct {
-		APIKey string `json:"api_key"`
-	}
+	var m registeredMerchant
 	if code := call(t, ts.Server, "POST", "/v1/merchants", adminToken, nil, map[string]string{"name": name}, &m); code != 201 {
 		t.Fatalf("register %s: %d", name, code)
 	}
-	return m.APIKey
+	return m
 }
 
 func TestRateLimit_PerMerchant(t *testing.T) {
 	clock := &fakeClock{t: time.Now()}
 	ts := newTestServer(t, withLimits(httpapi.RateLimits{PerMerchant: limiter(clock, 3)}))
-	keyA := registerMerchant(t, ts, "Toko A")
-	keyB := registerMerchant(t, ts, "Toko B")
+	keyA := registerMerchant(t, ts, "Toko A").APIKey
+	keyB := registerMerchant(t, ts, "Toko B").APIKey
 	auth := func(k string) map[string]string { return map[string]string{"Authorization": "Bearer " + k} }
 
 	for i, wantRemaining := range []string{"2", "1", "0"} {

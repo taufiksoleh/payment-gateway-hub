@@ -40,7 +40,7 @@ func listKeys(t *testing.T, ts *testServer, apiKey string) []apiKeyJSON {
 
 func TestAPIKeys_RotationFlow(t *testing.T) {
 	ts := newTestServer(t)
-	key1 := registerMerchant(t, ts, "Toko")
+	key1 := registerMerchant(t, ts, "Toko").APIKey
 
 	keys := listKeys(t, ts, key1)
 	if len(keys) != 1 || !keys[0].Current || keys[0].Status != "active" || keys[0].Hint != "pgh_…"+key1[len(key1)-4:] {
@@ -84,7 +84,7 @@ func TestAPIKeys_RotationFlow(t *testing.T) {
 
 func TestAPIKeys_RevokeAndValidation(t *testing.T) {
 	ts := newTestServer(t)
-	key1 := registerMerchant(t, ts, "Toko")
+	key1 := registerMerchant(t, ts, "Toko").APIKey
 	first := listKeys(t, ts, key1)[0]
 
 	var e errJSON

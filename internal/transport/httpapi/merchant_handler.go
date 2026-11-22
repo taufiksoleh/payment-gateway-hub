@@ -26,12 +26,12 @@ type registerMerchantResponse struct {
 func (h *handlers) registerMerchant(w http.ResponseWriter, r *http.Request) {
 	var req registerMerchantRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	res, err := h.merchants.Register(r.Context(), usecase.RegisterMerchantInput{Name: req.Name, WebhookURL: req.WebhookURL})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, registerMerchantResponse{
@@ -72,7 +72,7 @@ func toGatewayResponse(c domain.GatewayCredential) gatewayResponse {
 func (h *handlers) saveGateway(w http.ResponseWriter, r *http.Request) {
 	var req saveGatewayRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	m := merchantFrom(r.Context())
@@ -82,7 +82,7 @@ func (h *handlers) saveGateway(w http.ResponseWriter, r *http.Request) {
 		Secrets:     req.Secrets,
 	})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toGatewayResponse(*cred))
@@ -93,7 +93,7 @@ func (h *handlers) listGateways(w http.ResponseWriter, r *http.Request) {
 	m := merchantFrom(r.Context())
 	creds, err := h.merchants.ListCredentials(r.Context(), m.ID)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"gateways": mapSlice(creds, toGatewayResponse)})
@@ -103,7 +103,7 @@ func (h *handlers) listGateways(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) deleteGateway(w http.ResponseWriter, r *http.Request) {
 	m := merchantFrom(r.Context())
 	if err := h.merchants.DeleteCredential(r.Context(), m.ID, domain.Provider(r.PathValue("provider"))); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

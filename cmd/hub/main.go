@@ -18,6 +18,7 @@ import (
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/app"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/config"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/logging"
 )
 
 func main() {
@@ -33,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	log := slog.New(logging.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
 	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

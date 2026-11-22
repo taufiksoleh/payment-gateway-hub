@@ -56,8 +56,7 @@ func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 			}
 			existing, err := store.Claim(r.Context(), claim, idempotency.ReclaimAt(claim.CreatedAt))
 			if err != nil {
-				log.ErrorContext(r.Context(), "idempotency claim failed", "error", err)
-				writeError(w, err)
+				writeError(w, r, err)
 				return
 			}
 			if existing != nil {

@@ -49,13 +49,13 @@ func (req createPaymentRequest) toInput() usecase.CreatePaymentInput {
 func (h *handlers) createPayment(w http.ResponseWriter, r *http.Request) {
 	var req createPaymentRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	m := merchantFrom(r.Context())
 	p, err := h.payments.Create(r.Context(), m.ID, req.toInput())
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, dto.FromPayment(*p))
@@ -66,7 +66,7 @@ func (h *handlers) getPayment(w http.ResponseWriter, r *http.Request) {
 	m := merchantFrom(r.Context())
 	p, err := h.payments.Get(r.Context(), m.ID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, dto.FromPayment(*p))
@@ -77,7 +77,7 @@ func (h *handlers) syncPayment(w http.ResponseWriter, r *http.Request) {
 	m := merchantFrom(r.Context())
 	p, err := h.payments.Sync(r.Context(), m.ID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, dto.FromPayment(*p))
@@ -92,13 +92,13 @@ type refundRequest struct {
 func (h *handlers) refundPayment(w http.ResponseWriter, r *http.Request) {
 	var req refundRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	m := merchantFrom(r.Context())
 	p, err := h.payments.Refund(r.Context(), m.ID, r.PathValue("id"), usecase.RefundInput{Amount: req.Amount, Reason: req.Reason})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, dto.FromPayment(*p))
@@ -108,7 +108,7 @@ func (h *handlers) refundPayment(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) providerWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	if err != nil {
-		writeError(w, domain.ErrInvalidInput)
+		writeError(w, r, domain.ErrInvalidInput)
 		return
 	}
 	err = h.payments.HandleWebhook(r.Context(),
@@ -117,8 +117,7 @@ func (h *handlers) providerWebhook(w http.ResponseWriter, r *http.Request) {
 		gateway.WebhookRequest{Path: r.URL.Path, Headers: r.Header, Body: body},
 	)
 	if err != nil {
-		h.log.WarnContext(r.Context(), "provider webhook rejected", "path", r.URL.Path, "error", err)
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -142,21 +141,21 @@ func (h *handlers) listPayments(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	if f.CreatedFrom, err = queryTime(q.Get("created_from"), "created_from"); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	if f.CreatedTo, err = queryTime(q.Get("created_to"), "created_to"); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	if f.Limit, err = queryInt(q, "limit"); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 
 	page, err := h.payments.List(r.Context(), merchantFrom(r.Context()).ID, f)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, paymentListResponse{

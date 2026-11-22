@@ -20,6 +20,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/metrics"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/logging"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/ratelimit"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
@@ -44,6 +45,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	m := metrics.New()
 
 	providerClient := gateway.DefaultHTTPClient()
+	providerClient.Transport = logging.Transport(http.DefaultTransport, log)
 	gateways := gateway.NewRegistry(
 		m.Gateway(midtrans.New(midtrans.Options{
 			HTTPClient: providerClient,
