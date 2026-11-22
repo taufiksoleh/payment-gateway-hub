@@ -2,7 +2,8 @@
 BIN := bin/hub
 PKG := ./...
 
-.PHONY: help run build test test-race cover lint fmt vet tidy db-up db-down docker
+.PHONY: help run build test test-race cover lint fmt vet tidy db-up db-down docker \
+	up down clean logs ps demo demo-local
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -34,11 +35,33 @@ vet: ## Run go vet
 tidy: ## Tidy go.mod
 	go mod tidy
 
-db-up: ## Start PostgreSQL in Docker
-	docker compose up -d postgres
+db-up: ## Start only PostgreSQL in Docker (for `make run`)
+	docker compose up -d --wait postgres
 
-db-down: ## Stop PostgreSQL
+db-down: ## Stop the Docker stack
 	docker compose down
 
-docker: ## Build the Docker image
-	docker build -t payment-gateway-hub .
+docker: ## Build the production image
+	docker build --target hub -t payment-gateway-hub .
+
+# Local stack: hub + Postgres + mock Midtrans + webhook sink
+up: ## Build and start the local stack, wait until healthy
+	docker compose up -d --build --wait
+
+down: ## Stop the local stack (keeps data)
+	docker compose down
+
+clean: ## Stop the local stack and delete its data
+	docker compose down -v
+
+logs: ## Follow logs of the local stack
+	docker compose logs -f hub mock-midtrans webhook-sink
+
+ps: ## Show the local stack's containers
+	docker compose ps
+
+demo: ## Run the end-to-end demo inside Docker
+	docker compose run --rm --build demo
+
+demo-local: ## Run the end-to-end demo from the host (needs Go)
+	go run ./dev/demo

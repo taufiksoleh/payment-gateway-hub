@@ -1,3 +1,15 @@
+# Local stack: `make up`, then `make demo`.
+#
+#   hub            the API                 http://localhost:8080
+#   postgres       its database            localhost:5432
+#   mock-midtrans  fake Midtrans API       http://localhost:8081
+#   webhook-sink   fake merchant endpoint  http://localhost:8090/events
+#
+# Defaults need no .env. Override any ${VAR} from your shell or .env, e.g.
+# MIDTRANS_SANDBOX_URL=https://api.sandbox.midtrans.com to use the real
+# Midtrans sandbox instead of the mock.
+name: payment-gateway-hub
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -6,24 +18,72 @@ services:
       POSTGRES_PASSWORD: hub
       POSTGRES_DB: hub
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hub"]
-      interval: 5s
-      retries: 10
+      interval: 2s
+      retries: 30
 
   hub:
-    build: .
+    build:
+      context: .
+      target: hub
     depends_on:
       postgres:
         condition: service_healthy
-    env_file: .env
     environment:
       DATABASE_URL: postgres://hub:hub@postgres:5432/hub?sslmode=disable
+      # Development-only secrets. Never reuse them anywhere real.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-ZGV2LW9ubHktZW5jcnlwdGlvbi1rZXktMzJieXRlcyE=}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MIDTRANS_SANDBOX_URL: ${MIDTRANS_SANDBOX_URL:-http://mock-midtrans:8081}
+      XENDIT_BASE_URL: ${XENDIT_BASE_URL:-}
+      DOKU_SANDBOX_URL: ${DOKU_SANDBOX_URL:-}
     ports:
-      - "8080:8080"
+      - "${HUB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/hub", "-healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mock-midtrans:
+    build:
+      context: .
+      target: mock-midtrans
+    ports:
+      - "${MOCK_MIDTRANS_PORT:-8081}:8081"
+
+  webhook-sink:
+    build:
+      context: .
+      target: webhook-sink
+    ports:
+      - "${WEBHOOK_SINK_PORT:-8090}:8090"
+
+  # One-off: `docker compose run --rm demo` (or `make demo`).
+  demo:
+    build:
+      context: .
+      target: demo
+    profiles: [tools]
+    depends_on:
+      hub:
+        condition: service_healthy
+      mock-midtrans:
+        condition: service_started
+      webhook-sink:
+        condition: service_started
+    environment:
+      HUB_URL: http://hub:8080
+      MOCK_URL: http://mock-midtrans:8081
+      SINK_URL: http://webhook-sink:8090
+      HUB_INTERNAL_URL: http://hub:8080
+      SINK_INTERNAL_URL: http://webhook-sink:8090/hook
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
 
 volumes:
   pgdata:

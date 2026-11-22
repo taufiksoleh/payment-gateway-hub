@@ -42,9 +42,65 @@ merchant's own vendor account.
 | `card` | — | — | card |
 | Refund API | ✅ | ✅ | — (dashboard) |
 
-## Quick start
+## Quick start with Docker
 
-Requirements: Go 1.25+, Docker (optional, for PostgreSQL).
+You only need Docker. No vendor account is required: a mock Midtrans and a
+fake merchant endpoint run alongside the hub.
+
+```bash
+make up
+```
+
+```bash
+make demo
+```
+
+`make up` builds and starts the local stack and waits until it's healthy.
+`make demo` then runs the whole flow:
+
+1. Register a merchant and connect Midtrans.
+2. Create a VA payment and settle it at the mock.
+3. The hub marks the payment paid, and the merchant gets a signed webhook.
+4. A partial refund triggers a second webhook.
+
+The demo exits non-zero if any step fails, so it also works as a smoke test.
+
+| Service | URL | Role |
+|---|---|---|
+| `hub` | http://localhost:8080 | The API. Admin token: `dev-admin-token` |
+| `postgres` | localhost:5432 (`hub`/`hub`) | Its database |
+| `mock-midtrans` | http://localhost:8081 | Fake Midtrans API (`dev/mockmidtrans`) |
+| `webhook-sink` | http://localhost:8090/events | Fake merchant endpoint that logs and verifies webhooks (`dev/webhooksink`) |
+
+Drive the flow by hand:
+
+```bash
+# Simulate the customer paying (also: expire, cancel, deny).
+curl -s -X POST localhost:8081/simulate/<payment_id>/settlement \
+  -d '{"notification_url": "http://hub:8080/webhooks/midtrans/<merchant_id>"}'
+
+# What did the merchant receive? Is each signature valid?
+curl -s localhost:8090/events
+
+# Make the merchant endpoint fail, to watch retries and dead webhooks.
+curl -s -X POST localhost:8090/control -d '{"status": 503}'
+```
+
+| Command | Effect |
+|---|---|
+| `make logs` | Follow hub, mock and sink logs |
+| `make ps` | Container status |
+| `make down` | Stop the stack and keep its data |
+| `make clean` | Stop the stack and delete its data |
+| `make demo-local` | Run the demo from the host with `go run` |
+
+- **Changing settings:** every setting has a development default, so no `.env` is needed. Override any of them in your shell or `.env`, for example `HUB_PORT=9080` or `POSTGRES_PORT=5433` if those ports are taken.
+- **Real Midtrans sandbox:** set `MIDTRANS_SANDBOX_URL=https://api.sandbox.midtrans.com` and use your own sandbox server key.
+- **Development secrets:** the stack uses a fixed encryption key and admin token. Never use them outside your machine.
+
+## Quick start without Docker
+
+Requirements: Go 1.25+, and optionally PostgreSQL.
 
 ```bash
 cp .env.example .env
@@ -269,6 +325,10 @@ internal/
   config/                environment variables
   app/                   composition root: wires everything
 migrations/              SQL files, embedded and applied on startup
+dev/                     local testing tools, not part of the product
+  mockmidtrans/          fake Midtrans API
+  webhooksink/           fake merchant webhook endpoint
+  demo/                  end-to-end demo and smoke test
 docs/                    architecture and how-to guides
 ```
 

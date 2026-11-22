@@ -28,6 +28,12 @@ type Config struct {
 	RateLimitIPPerMin       int  // RATE_LIMIT_IP_PER_MIN, 1200
 	RateLimitAdminPerMin    int  // RATE_LIMIT_ADMIN_PER_MIN, 10
 	TrustProxy              bool // TRUST_PROXY, false
+
+	// Provider base URL overrides, for staging proxies or the local mocks.
+	// Empty keeps the provider's real URL.
+	MidtransSandboxURL string // MIDTRANS_SANDBOX_URL
+	XenditBaseURL      string // XENDIT_BASE_URL
+	DOKUSandboxURL     string // DOKU_SANDBOX_URL
 }
 
 func Load() (Config, error) {
@@ -36,6 +42,10 @@ func Load() (Config, error) {
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 		AdminToken:    os.Getenv("ADMIN_TOKEN"),
+
+		MidtransSandboxURL: os.Getenv("MIDTRANS_SANDBOX_URL"),
+		XenditBaseURL:      os.Getenv("XENDIT_BASE_URL"),
+		DOKUSandboxURL:     os.Getenv("DOKU_SANDBOX_URL"),
 	}
 
 	var errs []error

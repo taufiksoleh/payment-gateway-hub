@@ -42,9 +42,15 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 
 	providerClient := gateway.DefaultHTTPClient()
 	gateways := gateway.NewRegistry(
-		midtrans.New(midtrans.Options{HTTPClient: providerClient}),
-		xendit.New(xendit.Options{HTTPClient: providerClient}),
-		doku.New(doku.Options{HTTPClient: providerClient}),
+		midtrans.New(midtrans.Options{
+			HTTPClient: providerClient,
+			Endpoints:  gateway.Endpoints{Sandbox: cfg.MidtransSandboxURL},
+		}),
+		xendit.New(xendit.Options{HTTPClient: providerClient, BaseURL: cfg.XenditBaseURL}),
+		doku.New(doku.Options{
+			HTTPClient: providerClient,
+			Endpoints:  gateway.Endpoints{Sandbox: cfg.DOKUSandboxURL},
+		}),
 	)
 
 	repos, err := a.openStorage(ctx)

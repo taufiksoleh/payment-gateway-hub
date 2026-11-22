@@ -8,6 +8,12 @@ linters:
     - noctx
     - revive
     - unconvert
+  exclusions:
+    rules:
+      # dev/ holds local test tools; fake ids need no cryptographic randomness.
+      - path: ^dev/
+        linters: [gosec]
+        text: G404
   settings:
     errcheck:
       # Errors from Close on read paths carry no actionable information.
