@@ -3,7 +3,7 @@
 # One build stage compiles every binary; each runtime target copies one.
 # The hub is the last stage, so a plain `docker build .` produces it.
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
