@@ -72,12 +72,15 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Logger:   log,
 	})
 
+	webhooks := usecase.NewWebhookService(repos.webhooks)
+
 	// 5. HTTP.
 	a.server = &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Payments:    payments,
 			Merchants:   merchants,
+			Webhooks:    webhooks,
 			Providers:   gateways.Providers(),
 			AdminToken:  cfg.AdminToken,
 			Idempotency: repos.idempotency,
@@ -97,6 +100,7 @@ type repositories struct {
 	creds       usecase.CredentialRepository
 	idempotency idempotency.Store
 	outbox      outbox.Store
+	webhooks    usecase.WebhookRepository // same store as outbox, merchant-facing view
 }
 
 func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
@@ -109,6 +113,7 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 			creds:       memory.NewCredentialRepo(),
 			idempotency: memory.NewIdempotencyStore(),
 			outbox:      ob,
+			webhooks:    ob,
 		}, nil
 	}
 
@@ -125,12 +130,14 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	a.db = db
+	outboxStore := postgres.NewOutboxStore(db)
 	return &repositories{
 		payments:    postgres.NewPaymentRepo(db, notify.EncodeEvent),
 		merchants:   postgres.NewMerchantRepo(db),
 		creds:       postgres.NewCredentialRepo(db, cipher),
 		idempotency: postgres.NewIdempotencyStore(db),
-		outbox:      postgres.NewOutboxStore(db),
+		outbox:      outboxStore,
+		webhooks:    outboxStore,
 	}, nil
 }
 

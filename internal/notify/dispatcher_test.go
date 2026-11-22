@@ -196,3 +196,36 @@ func TestDispatcher_Run(t *testing.T) {
 		t.Fatalf("deliveries = %d, want 3", srv.deliveries())
 	}
 }
+
+// After the merchant fixes their endpoint, a replayed dead webhook is
+// delivered with the same event id and payload.
+func TestDispatcher_DeliversReplayedDeadWebhook(t *testing.T) {
+	srv := newMerchantServer(t)
+	srv.setStatus(http.StatusInternalServerError)
+	f := newDispatchFixture(t, srv.URL)
+	f.enqueue(t, "evt_1")
+
+	for i := 0; i < outbox.MaxAttempts; i++ {
+		f.dispatch(t)
+		f.clock = f.clock.Add(2 * time.Hour)
+	}
+	if d, _ := f.outbox.Find(context.Background(), f.merchant.ID, "evt_1"); d.Status() != outbox.StatusDead {
+		t.Fatalf("status = %s, want dead", d.Status())
+	}
+
+	srv.setStatus(http.StatusOK)
+	if err := f.outbox.Replay(context.Background(), f.merchant.ID, "evt_1", f.clock); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.dispatch(t); n != 1 {
+		t.Fatalf("replayed webhook dispatched %d times, want 1", n)
+	}
+	d, _ := f.outbox.Find(context.Background(), f.merchant.ID, "evt_1")
+	if d.Status() != outbox.StatusDelivered || d.Attempts != 0 {
+		t.Fatalf("after replay: status=%s attempts=%d", d.Status(), d.Attempts)
+	}
+	last := srv.bodies[len(srv.bodies)-1]
+	if string(last) != `{"id":"evt_1"}` {
+		t.Fatalf("replayed payload = %s", last)
+	}
+}

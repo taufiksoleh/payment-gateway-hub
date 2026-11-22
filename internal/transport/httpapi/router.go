@@ -10,6 +10,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
@@ -32,10 +33,19 @@ type MerchantUsecase interface {
 	DeleteCredential(ctx context.Context, merchantID string, p domain.Provider) error
 }
 
+// WebhookUsecase is what the handlers need from usecase.WebhookService.
+type WebhookUsecase interface {
+	List(ctx context.Context, merchantID string, in usecase.ListWebhooksInput) (*usecase.WebhookPage, error)
+	Get(ctx context.Context, merchantID, id string) (*outbox.Delivery, error)
+	Replay(ctx context.Context, merchantID, id string) (*outbox.Delivery, error)
+	ReplayAllDead(ctx context.Context, merchantID string) (int64, error)
+}
+
 // Deps are the router's dependencies.
 type Deps struct {
 	Payments    PaymentUsecase
 	Merchants   MerchantUsecase
+	Webhooks    WebhookUsecase
 	Providers   []domain.Provider // for GET /v1/providers
 	AdminToken  string            // protects merchant registration
 	Idempotency idempotency.Store // backs the Idempotency-Key header
@@ -44,7 +54,7 @@ type Deps struct {
 
 // NewRouter builds the HTTP handler with every route and middleware.
 func NewRouter(d Deps) http.Handler {
-	h := &handlers{payments: d.Payments, merchants: d.Merchants, providers: d.Providers, log: d.Logger}
+	h := &handlers{payments: d.Payments, merchants: d.Merchants, webhooks: d.Webhooks, providers: d.Providers, log: d.Logger}
 	merchant := requireMerchant(d.Merchants)
 	admin := requireAdmin(d.AdminToken)
 	idem := idempotent(d.Idempotency, d.Logger)
@@ -70,6 +80,12 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("POST /v1/payments/{id}/sync", merchant(http.HandlerFunc(h.syncPayment)))
 	mux.Handle("POST /v1/payments/{id}/refunds", merchantIdem(h.refundPayment))
 
+	// Merchant: webhooks the hub sent them (inspect, replay dead ones)
+	mux.Handle("GET /v1/webhooks", merchant(http.HandlerFunc(h.listWebhooks)))
+	mux.Handle("GET /v1/webhooks/{id}", merchant(http.HandlerFunc(h.getWebhook)))
+	mux.Handle("POST /v1/webhooks/{id}/replay", merchant(http.HandlerFunc(h.replayWebhook)))
+	mux.Handle("POST /v1/webhooks/replay", merchant(http.HandlerFunc(h.replayDeadWebhooks)))
+
 	// Provider callbacks (authenticated by provider signature)
 	mux.HandleFunc("POST /webhooks/{provider}/{merchantID}", h.providerWebhook)
 
@@ -79,6 +95,7 @@ func NewRouter(d Deps) http.Handler {
 type handlers struct {
 	payments  PaymentUsecase
 	merchants MerchantUsecase
+	webhooks  WebhookUsecase
 	providers []domain.Provider
 	log       *slog.Logger
 }

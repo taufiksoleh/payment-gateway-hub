@@ -136,6 +136,17 @@ notify.Dispatcher (every second)        claim due rows → sign → POST → del
   are read at delivery time, so retries follow configuration changes.
 - **Housekeeping:** delivered rows are purged after 7 days. Dead rows are
   kept.
+- **Merchants can inspect and replay** their webhooks
+  (`/v1/webhooks`, via `usecase.WebhookService`). The same outbox store
+  implements a second, merchant-facing port, `usecase.WebhookRepository`:
+  - **Scoped to one merchant:** another merchant's id behaves as "not
+    found", even when used as a pagination cursor.
+  - **Keyset pagination** on `(created_at, id)`, so pages don't shift as
+    new webhooks arrive.
+  - **Replay is a single conditional `UPDATE ... WHERE dead_at IS NOT NULL`.**
+    It resets the attempts and makes the message due now. Only dead messages
+    qualify, because merchants de-duplicate on the event id, which a replay
+    keeps.
 
 **`Idempotency-Key` is HTTP middleware, not a use case.** "Replay the response
 you sent earlier" is about the API, not about payments. So it lives in
@@ -209,6 +220,6 @@ later, notify.Dispatcher:
 | Domain | Validation, state machine, refunds | Plain table tests |
 | Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races, a second refund fired while the first is at the vendor, exactly one outbox event per real change | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
-| Dispatcher | Signed delivery, backoff timing, giving up after max attempts, merchants without a URL, the run loop | memory outbox + `httptest` merchant server + fake clock |
+| Dispatcher | Signed delivery, backoff timing, giving up after max attempts, merchants without a URL, the run loop, delivering a replayed dead webhook | memory outbox + `httptest` merchant server + fake clock |
 | HTTP | Routing, auth, error mapping, full flow, Idempotency-Key replay/reuse/in-progress/retry-after-failure | `httptest` + real use cases + memory repos |
-| Storage | SQL correctness, migrations, optimistic locks, outbox atomicity (a losing update writes no event), the idempotency and outbox store contracts | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |
+| Storage | SQL correctness, migrations, optimistic locks, outbox atomicity (a losing update writes no event), the idempotency, outbox and webhook-repository contracts | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |

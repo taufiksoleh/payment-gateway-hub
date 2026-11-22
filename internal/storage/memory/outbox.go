@@ -2,11 +2,14 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
 // Outbox keeps webhook messages in memory. Fine for tests and local
@@ -33,7 +36,10 @@ func NewOutbox(encode outbox.Encoder) *Outbox {
 	return &Outbox{encode: encode, entries: map[string]*outboxEntry{}}
 }
 
-var _ outbox.Store = (*Outbox)(nil)
+var (
+	_ outbox.Store              = (*Outbox)(nil)
+	_ usecase.WebhookRepository = (*Outbox)(nil)
+)
 
 // Enqueue adds messages, due immediately.
 func (o *Outbox) Enqueue(_ context.Context, msgs ...outbox.Message) error {
@@ -127,4 +133,115 @@ func (o *Outbox) update(id string, fn func(*outboxEntry)) error {
 		fn(e)
 	}
 	return nil
+}
+
+// --- usecase.WebhookRepository: merchants inspecting their webhooks ---
+
+func (o *Outbox) List(_ context.Context, merchantID string, f outbox.ListFilter) ([]outbox.Delivery, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	var all []outbox.Delivery
+	for _, e := range o.entries {
+		if e.msg.MerchantID != merchantID {
+			continue
+		}
+		d := e.delivery()
+		if f.Status != "" && d.Status() != f.Status {
+			continue
+		}
+		d.Payload = nil // lists omit payloads; Find returns them
+		all = append(all, d)
+	}
+	sort.Slice(all, func(i, j int) bool { return newerFirst(all[i].Message, all[j].Message) })
+
+	// Keyset pagination: skip everything up to and including the cursor.
+	if f.Cursor != "" {
+		cursor, ok := o.entries[f.Cursor]
+		if !ok || cursor.msg.MerchantID != merchantID {
+			return nil, nil
+		}
+		i := 0
+		for i < len(all) && !newerFirst(cursor.msg, all[i].Message) {
+			i++
+		}
+		all = all[i:]
+	}
+	if len(all) > f.Limit {
+		all = all[:f.Limit]
+	}
+	return all, nil
+}
+
+func (o *Outbox) Find(_ context.Context, merchantID, id string) (*outbox.Delivery, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	e, ok := o.entries[id]
+	if !ok || e.msg.MerchantID != merchantID {
+		return nil, domain.ErrNotFound
+	}
+	d := e.delivery()
+	return &d, nil
+}
+
+func (o *Outbox) Replay(_ context.Context, merchantID, id string, at time.Time) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	e, ok := o.entries[id]
+	if !ok || e.msg.MerchantID != merchantID {
+		return domain.ErrNotFound
+	}
+	if e.deadAt.IsZero() {
+		return fmt.Errorf("%w: only dead webhooks can be replayed (status is %s)", domain.ErrInvalidTransition, e.delivery().Status())
+	}
+	e.revive(at)
+	return nil
+}
+
+func (o *Outbox) ReplayAllDead(_ context.Context, merchantID string, at time.Time) (int64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var n int64
+	for _, e := range o.entries {
+		if e.msg.MerchantID == merchantID && !e.deadAt.IsZero() {
+			e.revive(at)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// revive makes a dead entry pending again with a fresh set of attempts.
+func (e *outboxEntry) revive(at time.Time) {
+	e.deadAt = time.Time{}
+	e.msg.Attempts = 0
+	e.nextAttemptAt = at
+	e.lastError = ""
+	e.lockedUntil = time.Time{}
+}
+
+func (e *outboxEntry) delivery() outbox.Delivery {
+	d := outbox.Delivery{
+		Message:       e.msg,
+		NextAttemptAt: e.nextAttemptAt,
+		LastError:     e.lastError,
+	}
+	d.Payload = append([]byte(nil), e.msg.Payload...)
+	if !e.deliveredAt.IsZero() {
+		t := e.deliveredAt
+		d.DeliveredAt = &t
+	}
+	if !e.deadAt.IsZero() {
+		t := e.deadAt
+		d.DeadAt = &t
+	}
+	return d
+}
+
+// newerFirst orders by created_at, then id, both descending.
+func newerFirst(a, b outbox.Message) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID > b.ID
 }

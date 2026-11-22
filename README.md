@@ -107,6 +107,10 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 | GET | `/v1/payments/{id}` | API key | Get a payment |
 | POST | `/v1/payments/{id}/sync` | API key | Pull latest status from the vendor |
 | POST | `/v1/payments/{id}/refunds` | API key | Refund (`amount` optional, defaults to full) |
+| GET | `/v1/webhooks` | API key | Your webhooks, newest first (`status`, `limit`, `cursor`) |
+| GET | `/v1/webhooks/{id}` | API key | One webhook, including its exact payload |
+| POST | `/v1/webhooks/{id}/replay` | API key | Re-send a dead webhook |
+| POST | `/v1/webhooks/replay` | API key | Re-send all your dead webhooks |
 | POST | `/webhooks/{provider}/{merchant_id}` | vendor signature | Vendor notifications |
 
 Errors always look like `{"error": {"code": "...", "message": "...", "field": "..."}}`.
@@ -158,6 +162,26 @@ Event body: `{"id","type":"payment.paid","created_at","data":{...payment}}`.
 - **Retries:** any non-2xx answer or timeout (10 seconds) is retried with exponential backoff: 10s, 20s, 40s and so on, capped at 1 hour. After 12 attempts (about 5 hours) the event is marked dead and kept for inspection in `webhook_outbox`.
 - **Ordering is not guaranteed** while retries are happening. Use `data.updated_at` or `created_at` to order events, or re-fetch the payment.
 - **No webhook URL:** if your merchant account has no `webhook_url`, events are settled without being sent.
+
+### Inspecting and replaying webhooks
+
+If your endpoint was down long enough for webhooks to die, fix it, then replay them:
+
+```bash
+# What died, and why?
+curl -s "localhost:8080/v1/webhooks?status=dead" -H "Authorization: Bearer $API_KEY"
+#   → {"webhooks":[{"id":"evt_...","type":"payment.paid","payment_id":"pay_...",
+#        "status":"dead","attempts":12,"last_error":"merchant webhook answered http 500",...}],
+#      "next_cursor":"evt_..."}      ← pass as ?cursor= for the next page
+
+# Re-send one, or all of them at once.
+curl -s -X POST localhost:8080/v1/webhooks/evt_.../replay -H "Authorization: Bearer $API_KEY"
+curl -s -X POST localhost:8080/v1/webhooks/replay        -H "Authorization: Bearer $API_KEY"   # → {"replayed": 3}
+```
+
+- **Filters:** `status` is `pending`, `delivered` or `dead`. Leave it out to list everything. `limit` is 1–200 and defaults to 50.
+- **What replay does:** it queues the webhook again within about a second, with a fresh 12 attempts and the **same** event `id` and payload.
+- **Only dead webhooks can be replayed.** Anything else gets `409 invalid_state`. A delivered event would carry an id you have already processed.
 
 ## Project layout
 
@@ -214,7 +238,6 @@ TEST_DATABASE_URL='postgres://hub:hub@localhost:5432/hub?sslmode=disable' go tes
 This is a solid foundation, not yet production-certified. Before going live:
 
 - **Verify each adapter against the vendor sandbox.** The request and response shapes follow vendor documentation and are covered by tests against recorded-style responses. They have not yet been run against live sandbox accounts.
-- **Dead webhooks** are only visible in the `webhook_outbox` table (`dead_at IS NOT NULL`). There is no API yet to list or replay them.
 - **Xendit refunds** are asynchronous on Xendit's side. The hub marks a refund done once Xendit accepts it.
 - **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
 - **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.

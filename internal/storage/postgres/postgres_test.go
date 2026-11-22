@@ -145,4 +145,24 @@ func TestRepositories(t *testing.T) {
 	t.Run("outbox store contract", func(t *testing.T) {
 		outboxtest.RunStoreContract(t, postgres.NewOutboxStore(db), m.ID, p.ID)
 	})
+
+	t.Run("webhook repository contract", func(t *testing.T) {
+		// Two fresh merchants with one payment each and no webhooks yet.
+		account := func(name string) outboxtest.Account {
+			t.Helper()
+			mm, _ := domain.NewMerchant("mch_"+name+"_"+suffix, name, "hash_"+name+"_"+suffix, "", "whsec", now)
+			if err := merchants.Create(ctx, mm); err != nil {
+				t.Fatal(err)
+			}
+			pp, _ := domain.NewPayment(domain.NewPaymentParams{
+				ID: "pay_" + name + "_" + suffix, MerchantID: mm.ID, OrderID: "o",
+				Provider: domain.ProviderXendit, Method: domain.MethodQRIS, Channel: domain.ChannelQRIS, Amount: 1,
+			}, now)
+			if err := payments.Create(ctx, pp); err != nil {
+				t.Fatal(err)
+			}
+			return outboxtest.Account{MerchantID: mm.ID, PaymentID: pp.ID}
+		}
+		outboxtest.RunWebhookRepositoryContract(t, postgres.NewOutboxStore(db), account("a"), account("b"))
+	})
 }

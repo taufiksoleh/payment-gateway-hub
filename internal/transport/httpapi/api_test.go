@@ -29,27 +29,42 @@ func newServer(t *testing.T) *httptest.Server {
 // newServerWithFake also returns the fake gateway so tests can steer it.
 func newServerWithFake(t *testing.T) (*httptest.Server, *gatewaytest.Fake) {
 	t.Helper()
+	ts := newTestServer(t)
+	return ts.Server, ts.fake
+}
+
+// testServer exposes the pieces tests need to inspect or steer.
+type testServer struct {
+	*httptest.Server
+	fake   *gatewaytest.Fake
+	outbox *memory.Outbox
+}
+
+func newTestServer(t *testing.T) *testServer {
+	t.Helper()
 	fake := gatewaytest.New("fake")
 	registry := gateway.NewRegistry(fake)
 	merchantRepo := memory.NewMerchantRepo()
 	credRepo := memory.NewCredentialRepo()
+	ob := memory.NewOutbox(notify.EncodeEvent)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Merchants: usecase.NewMerchantService(merchantRepo, credRepo, registry),
 		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
-			Payments: memory.NewPaymentRepo(memory.NewOutbox(notify.EncodeEvent)),
+			Payments: memory.NewPaymentRepo(ob),
 			Creds:    credRepo,
 			Gateways: registry,
 			Logger:   log,
 		}),
+		Webhooks:    usecase.NewWebhookService(ob),
 		Providers:   registry.Providers(),
 		AdminToken:  adminToken,
 		Idempotency: memory.NewIdempotencyStore(),
 		Logger:      log,
 	}))
 	t.Cleanup(srv.Close)
-	return srv, fake
+	return &testServer{Server: srv, fake: fake, outbox: ob}
 }
 
 // call sends a JSON request and decodes the JSON response into out.

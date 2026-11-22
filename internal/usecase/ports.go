@@ -7,9 +7,11 @@ package usecase
 
 import (
 	"context"
+	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 )
 
 // PaymentRepository persists payments.
@@ -43,4 +45,21 @@ type CredentialRepository interface {
 // implements it.
 type GatewayResolver interface {
 	Get(p domain.Provider) (gateway.Gateway, error)
+}
+
+// WebhookRepository lets merchants inspect and replay their webhooks. Every
+// method is scoped to one merchant: another merchant's message is reported
+// as domain.ErrNotFound.
+type WebhookRepository interface {
+	List(ctx context.Context, merchantID string, f outbox.ListFilter) ([]outbox.Delivery, error)
+	Find(ctx context.Context, merchantID, id string) (*outbox.Delivery, error)
+
+	// Replay puts a dead message back in the queue, due at `at`, with its
+	// attempts reset. It returns domain.ErrInvalidTransition if the message
+	// is not dead.
+	Replay(ctx context.Context, merchantID, id string, at time.Time) error
+
+	// ReplayAllDead replays every dead message of the merchant and returns
+	// how many.
+	ReplayAllDead(ctx context.Context, merchantID string, at time.Time) (int64, error)
 }
