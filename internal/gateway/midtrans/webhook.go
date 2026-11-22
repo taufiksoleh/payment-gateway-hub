@@ -37,10 +37,11 @@ func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential,
 	}
 
 	return &gateway.WebhookEvent{
-		PaymentID:   n.OrderID,
-		ProviderRef: n.TransactionID,
-		Status:      mapStatus(n.TransactionStatus, n.FraudStatus),
-		PaidAt:      parseTime(n.SettlementTime),
+		PaymentID:     n.OrderID,
+		ProviderRef:   n.TransactionID,
+		Status:        mapStatus(n.TransactionStatus, n.FraudStatus),
+		FailureReason: failureReason(n.TransactionStatus, n.FraudStatus),
+		PaidAt:        parseTime(n.SettlementTime),
 	}, nil
 }
 

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/taufiksoleh/payment-gateway-hub/internal/config"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/doku"
@@ -22,6 +24,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/logging"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/ratelimit"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/ratelimit/redislimit"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/postgres"
@@ -36,8 +39,10 @@ type App struct {
 	server        *http.Server
 	metricsServer *http.Server // nil when METRICS_ADDR=off
 	dispatcher    *notify.Dispatcher
+	payments      *usecase.PaymentService
 	repos         *repositories
-	db            *sql.DB // nil with in-memory storage
+	db            *sql.DB       // nil with in-memory storage
+	redis         *redis.Client // nil without REDIS_URL
 }
 
 func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error) {
@@ -62,19 +67,28 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	if err != nil {
 		return nil, err
 	}
+	if err := a.openRedis(ctx); err != nil {
+		if a.db != nil {
+			_ = a.db.Close()
+		}
+		return nil, err
+	}
 	a.repos = repos
 	if br, ok := repos.outbox.(outbox.BacklogReporter); ok {
 		m.WatchBacklog(br, time.Now)
 	}
 	a.dispatcher = notify.NewDispatcher(m.Outbox(repos.outbox), repos.merchants, notify.NewSender(nil), log)
 
+	a.payments = usecase.NewPaymentService(usecase.PaymentServiceDeps{
+		Payments: m.Payments(repos.payments),
+		Claims:   repos.orderClaims,
+		Creds:    repos.creds,
+		Gateways: gateways,
+		Logger:   log,
+	})
+
 	router := httpapi.NewRouter(httpapi.Deps{
-		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
-			Payments: m.Payments(repos.payments),
-			Creds:    repos.creds,
-			Gateways: gateways,
-			Logger:   log,
-		}),
+		Payments: a.payments,
 		Merchants: usecase.NewMerchantService(usecase.MerchantServiceDeps{
 			Merchants: repos.merchants,
 			Keys:      repos.apiKeys,
@@ -85,7 +99,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Providers:   gateways.Providers(),
 		AdminToken:  cfg.AdminToken,
 		Idempotency: repos.idempotency,
-		RateLimits:  rateLimits(cfg, m),
+		RateLimits:  a.rateLimits(m),
 		Logger:      log,
 		Instrument:  m.HTTP,
 	})
@@ -109,6 +123,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 
 type repositories struct {
 	payments    usecase.PaymentRepository
+	orderClaims usecase.OrderClaims
 	merchants   usecase.MerchantRepository
 	apiKeys     usecase.APIKeyRepository
 	creds       usecase.CredentialRepository
@@ -123,6 +138,7 @@ func (a *App) openStorage(ctx context.Context) (*repositories, error) {
 		ob := memory.NewOutbox(notify.EncodeEvent)
 		return &repositories{
 			payments:    memory.NewPaymentRepo(ob),
+			orderClaims: memory.NewOrderClaims(),
 			merchants:   memory.NewMerchantRepo(),
 			apiKeys:     memory.NewAPIKeyRepo(),
 			creds:       memory.NewCredentialRepo(),
@@ -152,6 +168,7 @@ func (a *App) openStorage(ctx context.Context) (*repositories, error) {
 	ob := postgres.NewOutboxStore(db)
 	return &repositories{
 		payments:    postgres.NewPaymentRepo(db, notify.EncodeEvent),
+		orderClaims: postgres.NewOrderClaims(db),
 		merchants:   postgres.NewMerchantRepo(db),
 		apiKeys:     postgres.NewAPIKeyRepo(db),
 		creds:       postgres.NewCredentialRepo(db, cipher),
@@ -159,6 +176,23 @@ func (a *App) openStorage(ctx context.Context) (*repositories, error) {
 		outbox:      ob,
 		idempotency: postgres.NewIdempotencyStore(db),
 	}, nil
+}
+
+func (a *App) openRedis(ctx context.Context) error {
+	if a.cfg.RedisURL == "" {
+		return nil
+	}
+	opts, err := redis.ParseURL(a.cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("REDIS_URL: %w", err)
+	}
+	client := redis.NewClient(opts)
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		return fmt.Errorf("connect to redis: %w", err)
+	}
+	a.redis = client
+	return nil
 }
 
 // Run serves HTTP until ctx is cancelled, then shuts down gracefully.
@@ -169,6 +203,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.dispatcher.Run(ctx)
 	}()
 	go a.housekeeping(ctx)
+	go a.reconcileRefunds(ctx)
 
 	errCh := make(chan error, 2)
 	go func() {
@@ -208,7 +243,30 @@ func (a *App) Run(ctx context.Context) error {
 			a.log.Warn("close database", "error", cerr)
 		}
 	}
+	if a.redis != nil {
+		_ = a.redis.Close()
+	}
 	return err
+}
+
+// refundReconcileAge leaves time for a refund request in flight to finish
+// before its reservation is treated as stuck.
+const refundReconcileAge = 5 * time.Minute
+
+// reconcileRefunds settles stuck refund reservations every few minutes.
+func (a *App) reconcileRefunds(ctx context.Context) {
+	ticker := time.NewTicker(refundReconcileAge)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := a.payments.ReconcileRefunds(ctx, refundReconcileAge); err != nil && ctx.Err() == nil {
+				a.log.WarnContext(ctx, "reconcile refunds", "error", err)
+			}
+		}
+	}
 }
 
 // housekeeping purges expired idempotency keys and old delivered webhooks
@@ -242,12 +300,19 @@ func (a *App) purge(ctx context.Context, what string, fn func() (int64, error)) 
 	}
 }
 
-func rateLimits(cfg config.Config, m *metrics.Metrics) httpapi.RateLimits {
+// rateLimits keeps buckets in Redis when REDIS_URL is set, so all instances
+// share one limit, and in process memory otherwise.
+func (a *App) rateLimits(m *metrics.Metrics) httpapi.RateLimits {
+	cfg := a.cfg
 	limiter := func(perMinute int, scope string) ratelimit.Limiter {
 		if perMinute == 0 {
 			return nil // disabled
 		}
-		return m.Limiter(ratelimit.NewTokenBucket(perMinute, ratelimit.BurstFor(perMinute)), scope)
+		burst := ratelimit.BurstFor(perMinute)
+		if a.redis != nil {
+			return m.Limiter(redislimit.New(a.redis, "hub:ratelimit:", perMinute, burst, a.log), scope)
+		}
+		return m.Limiter(ratelimit.NewTokenBucket(perMinute, burst), scope)
 	}
 	return httpapi.RateLimits{
 		PerIP:       limiter(cfg.RateLimitIPPerMin, "ip"),

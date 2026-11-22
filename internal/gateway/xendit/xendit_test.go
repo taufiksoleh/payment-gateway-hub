@@ -108,6 +108,7 @@ func TestParseWebhook(t *testing.T) {
 		headers http.Header
 		body    string
 		status  domain.Status
+		reason  string
 		wantErr error
 	}{
 		{
@@ -115,6 +116,20 @@ func TestParseWebhook(t *testing.T) {
 			headers: headers,
 			body:    `{"event":"payment.succeeded","data":{"payment_request_id":"pr-1","reference_id":"pay_1","status":"SUCCEEDED","created":"2026-01-01T10:00:00Z"}}`,
 			status:  domain.StatusPaid,
+		},
+		{
+			name:    "payment failed for lack of balance",
+			headers: headers,
+			body:    `{"event":"payment.failed","data":{"payment_request_id":"pr-1","reference_id":"pay_1","status":"FAILED","failure_code":"INSUFFICIENT_BALANCE"}}`,
+			status:  domain.StatusFailed,
+			reason:  domain.FailureInsufficientBalance,
+		},
+		{
+			name:    "payment failed for another reason",
+			headers: headers,
+			body:    `{"event":"payment.failed","data":{"payment_request_id":"pr-1","reference_id":"pay_1","status":"FAILED","failure_code":"USER_DECLINED_PAYMENT"}}`,
+			status:  domain.StatusFailed,
+			reason:  domain.FailureDeclined,
 		},
 		{
 			name:    "payment method expired",
@@ -147,7 +162,7 @@ func TestParseWebhook(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ev.PaymentID != "pay_1" || ev.Status != tt.status {
+			if ev.PaymentID != "pay_1" || ev.Status != tt.status || ev.FailureReason != tt.reason {
 				t.Fatalf("unexpected event: %+v", ev)
 			}
 		})

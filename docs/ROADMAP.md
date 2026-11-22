@@ -30,7 +30,7 @@ These hold for every step and decide what we do *not* build.
 
 | Phase | Merchant problem | Main deliverables | Size |
 |---|---|---|---|
-| 0 | "Can I trust this in production?" | Sandbox verification, failure reasons, refund reconciliation, Redis limiter | M |
+| 0 ✅ | "Can I trust this in production?" | Sandbox verification, failure reasons, refund reconciliation, Redis limiter | M |
 | 1 | "A gateway outage costs me sales" | Multi-provider failover, health tracking, routing rules | L |
 | 2 | "I can't tell where my money is" | Settlement import, automatic reconciliation, fee tracking, exports | L |
 | 3 | "My customers want to pay differently" | Payment links, hosted checkout, recurring payments | L |
@@ -43,20 +43,20 @@ Phases 1 and 2 are the core value of a hub: a single gateway can't fail over
 to its competitor, and it can't reconcile across providers. Phase 0 comes first
 because those features are useless if the base isn't verified.
 
-## Phase 0: production readiness
+## Phase 0: production readiness ✅
 
-The README's known limitations, closed.
+Built in November 2026. One item still needs people with vendor accounts.
 
-| Item | Why | Notes |
-|---|---|---|
-| Verify all three adapters against live sandbox accounts | Shapes are tested only against recorded-style responses | Add a `make sandbox-test` target that runs opt-in tests with real sandbox keys from the environment |
-| Fill `failure_reason` from provider responses | Merchants can't tell a declined e-wallet from an expired VA | Map each provider's codes onto a small shared set (`insufficient_balance`, `expired`, `declined`, `provider_error`) |
-| Background refund reconciliation | A crash between "provider accepted" and "hub recorded" leaves money in `pending_refund_amount` | Periodic job: for each stale reservation, query the provider's refund status, then complete or release |
-| Require `Idempotency-Key`, optionally per merchant | Retries without it can refund twice | Merchant setting; off by default for compatibility |
-| Claim `order_id` before calling the provider | Two concurrent creates can both reach the provider | Reserve the row in a `creating` state, then call the provider |
-| Shared rate limiter (Redis) | Limits are per instance today | New `ratelimit.Limiter` adapter; no other code changes |
-| Midtrans Mandiri bill payment (`echannel`) | Mandiri is one of the largest VA banks | Adapter-only change |
-| CI builds and scans the Docker image | Images are built only locally | Add a GitHub Actions job: build, run Trivy, push on tag |
+| Item | Status |
+|---|---|
+| Sandbox checks for all three adapters | `make sandbox-test` built; **not yet run against live sandbox accounts** |
+| `failure_reason` from provider responses | Done: Midtrans and Xendit codes mapped onto shared reasons |
+| Background refund reconciliation | Done: a refund whose answer was lost stays reserved and is resent with the same refund id until the vendor accepts it |
+| Require `Idempotency-Key` per merchant | Done: `PATCH /v1/settings` |
+| Claim `order_id` before calling the provider | Done: a short-lived claim table; the second request gets `409` |
+| Shared rate limiter (Redis) | Done: `REDIS_URL` |
+| Midtrans Mandiri bill payment (`echannel`) | Done |
+| CI builds and scans the Docker image | Done: Trivy on every push, image pushed to ghcr.io on `v*` tags |
 
 ## Phase 1: never lose a sale to an outage
 

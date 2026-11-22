@@ -106,6 +106,51 @@ func TestCreatePayment_UnsupportedChannel(t *testing.T) {
 	}
 }
 
+func TestCreatePayment_MandiriBill(t *testing.T) {
+	g := newServer(t, func(w http.ResponseWriter, _ *http.Request, body map[string]any) {
+		if body["payment_type"] != "echannel" {
+			t.Errorf("payment_type = %v", body["payment_type"])
+		}
+		ec, _ := body["echannel"].(map[string]any)
+		if ec["bill_info1"] != "Payment" || ec["bill_info2"] != "Langganan premium 12 bulan unt" {
+			t.Errorf("echannel = %v", ec)
+		}
+		_, _ = io.WriteString(w, `{"status_code":"201","transaction_id":"trx-2","transaction_status":"pending",
+			"bill_key":"990000000260","biller_code":"70012"}`)
+	})
+	res, err := g.CreatePayment(context.Background(), cred, gateway.CreatePaymentRequest{
+		PaymentID: "pay_2", Amount: 10000, Method: domain.MethodVirtualAccount, Channel: domain.ChannelMandiri,
+		Description: "Langganan premium 12 bulan untuk Toko Budi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action.VirtualAccountNumber != "990000000260" || res.Action.BillerCode != "70012" {
+		t.Fatalf("action = %+v", res.Action)
+	}
+}
+
+func TestParseWebhook_FailureReason(t *testing.T) {
+	g := midtrans.New(midtrans.Options{})
+	for _, tc := range []struct{ status, fraud, want string }{
+		{"deny", "deny", domain.FailureFraudSuspected},
+		{"deny", "accept", domain.FailureDeclined},
+		{"failure", "", domain.FailureProviderError},
+		{"expire", "", ""},
+	} {
+		sig := midtrans.Signature("pay_1", "202", "10000.00", "SB-Mid-server-xyz")
+		body := `{"order_id":"pay_1","status_code":"202","gross_amount":"10000.00","signature_key":"` + sig +
+			`","transaction_status":"` + tc.status + `","fraud_status":"` + tc.fraud + `"}`
+		ev, err := g.ParseWebhook(context.Background(), cred, gateway.WebhookRequest{Body: []byte(body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.FailureReason != tc.want {
+			t.Errorf("%s/%s: reason %q, want %q", tc.status, tc.fraud, ev.FailureReason, tc.want)
+		}
+	}
+}
+
 func TestParseWebhook(t *testing.T) {
 	g := midtrans.New(midtrans.Options{})
 	sig := midtrans.Signature("pay_1", "200", "10000.00", "SB-Mid-server-xyz")

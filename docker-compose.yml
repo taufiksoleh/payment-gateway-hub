@@ -3,6 +3,7 @@
 #   hub            the API                 http://localhost:8080
 #                  Prometheus metrics      http://localhost:9090/metrics
 #   postgres       its database            localhost:5432
+#   redis          shared rate limits      localhost:6379
 #   mock-midtrans  fake Midtrans API       http://localhost:8081
 #   webhook-sink   fake merchant endpoint  http://localhost:8090/events
 #
@@ -27,6 +28,15 @@ services:
       interval: 2s
       retries: 30
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
   hub:
     build:
       context: .
@@ -34,8 +44,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://hub:hub@postgres:5432/hub?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
       # Development-only secrets. Never reuse them anywhere real.
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-ZGV2LW9ubHktZW5jcnlwdGlvbi1rZXktMzJieXRlcyE=}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}

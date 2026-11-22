@@ -108,3 +108,36 @@ func (h *handlers) deleteGateway(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+type settingsResponse struct {
+	RequireIdempotencyKey bool `json:"require_idempotency_key"`
+}
+
+type updateSettingsRequest struct {
+	RequireIdempotencyKey *bool `json:"require_idempotency_key"`
+}
+
+func toSettingsResponse(m *domain.Merchant) settingsResponse {
+	return settingsResponse{RequireIdempotencyKey: m.RequireIdempotencyKey}
+}
+
+// GET /v1/settings
+func (h *handlers) getSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, toSettingsResponse(merchantFrom(r.Context())))
+}
+
+// PATCH /v1/settings
+func (h *handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var req updateSettingsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	m, err := h.merchants.UpdateSettings(r.Context(), merchantFrom(r.Context()).ID,
+		usecase.MerchantSettings{RequireIdempotencyKey: req.RequireIdempotencyKey})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toSettingsResponse(m))
+}

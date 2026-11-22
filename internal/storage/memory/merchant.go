@@ -26,6 +26,16 @@ func (r *MerchantRepo) Create(_ context.Context, m *domain.Merchant) error {
 	return nil
 }
 
+func (r *MerchantRepo) Update(_ context.Context, m *domain.Merchant) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.byID[m.ID]; !ok {
+		return domain.ErrNotFound
+	}
+	r.byID[m.ID] = *m
+	return nil
+}
+
 func (r *MerchantRepo) FindByID(_ context.Context, id string) (*domain.Merchant, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

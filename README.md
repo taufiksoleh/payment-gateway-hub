@@ -36,12 +36,29 @@ merchant's own vendor account.
 
 | Method | Midtrans | Xendit | DOKU (hosted checkout) |
 |---|---|---|---|
-| `virtual_account` | bca, bni, bri, cimb, permata | bca, bni, bri, mandiri, permata, bsi, cimb | bca, mandiri, bri, bni, permata, cimb |
+| `virtual_account` | bca, bni, bri, cimb, permata, mandiri¹ | bca, bni, bri, mandiri, permata, bsi, cimb | bca, mandiri, bri, bni, permata, cimb |
 | `qris` | qris | qris | qris |
 | `ewallet` | gopay, shopeepay | ovo, dana, shopeepay, linkaja | ovo, dana, shopeepay, linkaja |
 | `retail_outlet` | alfamart, indomaret | alfamart, indomaret | alfamart, indomaret |
 | `card` | — | — | card |
 | Refund API | ✅ | ✅ | — (dashboard) |
+
+¹ Mandiri bill payment: the customer pays with `action.biller_code` (company
+code) and `action.virtual_account_number` (bill key).
+
+### Failure reasons
+
+Failed, expired and cancelled payments carry a `failure_reason`, also in their
+webhook:
+
+| `failure_reason` | Meaning |
+|---|---|
+| `expired` | Not paid before the deadline |
+| `cancelled` | Cancelled at the vendor |
+| `declined` | Refused by the bank, wallet or customer; also any vendor code the hub doesn't map more precisely |
+| `insufficient_balance` | Not enough balance in the wallet or account (Xendit) |
+| `fraud_suspected` | Blocked by the vendor's fraud screening (Midtrans) |
+| `provider_error` | The vendor failed to process it (Midtrans `failure`) |
 
 ## Quick start with Docker
 
@@ -164,6 +181,8 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 | GET | `/v1/api-keys` | API key | Your API keys and their status |
 | POST | `/v1/api-keys/rotate` | API key | New key, old keys expire after a grace period |
 | DELETE | `/v1/api-keys/{id}` | API key | Revoke a key immediately |
+| GET | `/v1/settings` | API key | Your settings |
+| PATCH | `/v1/settings` | API key | Change settings (`require_idempotency_key`) |
 | GET | `/v1/gateways` | API key | List connected vendors |
 | PUT | `/v1/gateways/{provider}` | API key | Add or replace vendor credentials |
 | DELETE | `/v1/gateways/{provider}` | API key | Remove vendor credentials |
@@ -224,6 +243,32 @@ curl -s -X POST localhost:8080/v1/payments/pay_.../refunds \
 | Same key, first one failed (non-2xx) | Processed again, because failures are not stored |
 
 Keys belong to one merchant and are remembered for 24 hours.
+
+To make the header mandatory for your account, so a retry without it is
+refused instead of charging or refunding twice:
+
+```bash
+curl -s -X PATCH localhost:8080/v1/settings -H "Authorization: Bearer $API_KEY" \
+  -d '{"require_idempotency_key": true}'
+```
+
+Payment and refund creation then answer `422 invalid_input` (field
+`Idempotency-Key`) when the header is missing.
+
+Even without the header, two simultaneous `POST /v1/payments` with the same
+`order_id` never both reach the vendor: the second gets `409 conflict` and
+can retry shortly, which returns the first one's payment.
+
+### Refunds whose outcome is unknown
+
+If the vendor's answer to a refund is lost (timeout, 5xx), the hub can't
+know whether the money went back. It keeps the amount reserved in
+`pending_refund_amount`, so it can't be refunded again, and answers
+`502 provider_error`. A background job resends the same refund every five
+minutes; vendors recognise its id and don't refund twice. Once the vendor
+accepts it, the payment becomes `partially_refunded` or `refunded` and your
+webhook fires. A refund the vendor rejects on retry stays reserved and is
+logged as `refund retry rejected` for you to check in the vendor dashboard.
 
 ### Vendor credentials
 
@@ -307,6 +352,7 @@ curl -s -X DELETE localhost:8080/v1/api-keys/key_... -H "Authorization: Bearer $
 - **Bursts:** about 10 seconds' worth of requests can arrive at once (rate ÷ 6, minimum 5). Set a limit to `0` to disable it.
 - **Never limited:** vendor webhooks (`/webhooks/...`), because vendors share IPs across all merchants and throttling them would delay payment updates. Also `/healthz`.
 - **Headers:** every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the bucket is full). Over the limit you get `429 rate_limited` with `Retry-After` in seconds.
+- **Several instances:** set `REDIS_URL` so all hub instances share the same buckets. Without it each instance counts on its own, so N instances allow up to N times each limit. If Redis goes down, requests are allowed (and a warning is logged) rather than refused.
 - **Behind a load balancer:** set `TRUST_PROXY=true` so client IPs are read from `X-Forwarded-For` (the last entry, which your proxy appends). Leave it off otherwise, or clients could forge the header to dodge the limit.
 
 ### Logging
@@ -427,26 +473,31 @@ make lint        # golangci-lint
 make cover       # coverage summary
 ```
 
-PostgreSQL integration test:
+PostgreSQL and Redis integration tests (start them with `make up`, or only
+the databases with `docker compose up -d postgres redis`):
 
 ```bash
-make db-up
+TEST_DATABASE_URL='postgres://hub:hub@localhost:5432/hub?sslmode=disable' TEST_REDIS_URL='redis://localhost:6379/0' go test ./internal/storage/postgres/ ./internal/platform/ratelimit/redislimit/
 ```
 
+Checks against the vendors' real sandboxes, skipped for any vendor whose keys
+aren't set (see [docs/providers](docs/providers/README.md) for where to find them):
+
 ```bash
-TEST_DATABASE_URL='postgres://hub:hub@localhost:5432/hub?sslmode=disable' go test ./internal/storage/postgres/
+MIDTRANS_SANDBOX_SERVER_KEY=... XENDIT_SANDBOX_SECRET_KEY=... XENDIT_SANDBOX_CALLBACK_TOKEN=... DOKU_SANDBOX_CLIENT_ID=... DOKU_SANDBOX_SECRET_KEY=... make sandbox-test
 ```
+
+Each one creates a Rp10,000 BCA virtual account payment in the sandbox and
+reads its status back. No real money moves.
 
 ## Status and known limitations
 
 This is a solid foundation, not yet production-certified. Before going live:
 
-- **Verify each adapter against the vendor sandbox.** The request and response shapes follow vendor documentation and are covered by tests against recorded-style responses. They have not yet been run against live sandbox accounts.
+- **Run `make sandbox-test` with your own sandbox keys.** The adapters follow vendor documentation and are tested against recorded-style responses; the sandbox checks exist but haven't been run against live accounts by the project yet.
 - **Xendit refunds** are asynchronous on Xendit's side. The hub marks a refund done once Xendit accepts it.
-- **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
-- **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.
-- **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
-- **Rate limits are per instance.** Buckets live in memory, so N hub instances allow up to N times each limit. Implement `ratelimit.Limiter` on a shared store (such as Redis) if you need exact global limits.
-- **`failure_reason`** is part of the API but not yet filled from provider responses.
+- **Refund retries depend on vendor idempotency.** Midtrans accepts a resent `refund_key` for 7 days; a refund still unresolved after that needs a manual check. Reservations made before this version have no refund id and also need a manual check.
+- **`Idempotency-Key` is optional by default.** A client that retries a refund *without* it can refund again, up to the amount still refundable. Turn on `require_idempotency_key` to prevent that.
+- **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.

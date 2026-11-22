@@ -19,6 +19,7 @@ type chargeRequest struct {
 	GoPay              *gopayOptions      `json:"gopay,omitempty"`
 	ShopeePay          *shopeePayOptions  `json:"shopeepay,omitempty"`
 	CStore             *convenienceStore  `json:"cstore,omitempty"`
+	EChannel           *eChannel          `json:"echannel,omitempty"`
 }
 
 type transactionDetails struct {
@@ -40,6 +41,13 @@ type customExpiry struct {
 
 type bankTransfer struct {
 	Bank string `json:"bank"`
+}
+
+// eChannel is Mandiri bill payment. Mandiri shows at most 10 characters of
+// each label (bill_info1) and 30 of each value (bill_info2).
+type eChannel struct {
+	BillInfo1 string `json:"bill_info1"`
+	BillInfo2 string `json:"bill_info2"`
 }
 
 type qrisOptions struct {
@@ -74,6 +82,8 @@ type chargeResponse struct {
 	VANumbers         []vaNumber `json:"va_numbers"`
 	PermataVANumber   string     `json:"permata_va_number"`
 	PaymentCode       string     `json:"payment_code"`
+	BillKey           string     `json:"bill_key"`
+	BillerCode        string     `json:"biller_code"`
 	QRString          string     `json:"qr_string"`
 	Actions           []action   `json:"actions"`
 	ExpiryTime        string     `json:"expiry_time"`
@@ -128,6 +138,14 @@ func (g *Gateway) buildCharge(req gateway.CreatePaymentRequest) (*chargeRequest,
 	unsupported := gateway.UnsupportedChannel(domain.ProviderMidtrans, req.Method, req.Channel)
 	switch req.Method {
 	case domain.MethodVirtualAccount:
+		if req.Channel == domain.ChannelMandiri {
+			c.PaymentType = "echannel"
+			c.EChannel = &eChannel{BillInfo1: "Payment", BillInfo2: truncate(req.Description, 30)}
+			if c.EChannel.BillInfo2 == "" {
+				c.EChannel.BillInfo2 = "Online purchase"
+			}
+			break
+		}
 		bank, ok := vaBanks[req.Channel]
 		if !ok {
 			return nil, unsupported
@@ -172,6 +190,10 @@ func (r chargeResponse) action() domain.PaymentAction {
 	if r.PermataVANumber != "" {
 		a.VirtualAccountNumber = r.PermataVANumber
 	}
+	if r.BillKey != "" { // Mandiri bill payment: biller code + bill key
+		a.VirtualAccountNumber = r.BillKey
+		a.BillerCode = r.BillerCode
+	}
 	for _, act := range r.Actions {
 		switch act.Name {
 		case "generate-qr-code":
@@ -181,4 +203,11 @@ func (r chargeResponse) action() domain.PaymentAction {
 		}
 	}
 	return a
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }

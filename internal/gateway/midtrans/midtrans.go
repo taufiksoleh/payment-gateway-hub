@@ -70,9 +70,10 @@ func (g *Gateway) CreatePayment(ctx context.Context, cred domain.GatewayCredenti
 		return nil, err
 	}
 	result := &gateway.CreatePaymentResult{
-		ProviderRef: res.TransactionID,
-		Status:      mapStatus(res.TransactionStatus, res.FraudStatus),
-		Action:      res.action(),
+		ProviderRef:   res.TransactionID,
+		Status:        mapStatus(res.TransactionStatus, res.FraudStatus),
+		FailureReason: failureReason(res.TransactionStatus, res.FraudStatus),
+		Action:        res.action(),
 	}
 	if t := parseTime(res.ExpiryTime); t != nil {
 		result.ExpiresAt = *t
@@ -87,9 +88,10 @@ func (g *Gateway) GetStatus(ctx context.Context, cred domain.GatewayCredential, 
 		return nil, err
 	}
 	return &gateway.StatusResult{
-		ProviderRef: res.TransactionID,
-		Status:      mapStatus(res.TransactionStatus, res.FraudStatus),
-		PaidAt:      parseTime(res.SettlementTime),
+		ProviderRef:   res.TransactionID,
+		Status:        mapStatus(res.TransactionStatus, res.FraudStatus),
+		FailureReason: failureReason(res.TransactionStatus, res.FraudStatus),
+		PaidAt:        parseTime(res.SettlementTime),
 	}, nil
 }
 
@@ -156,6 +158,21 @@ func mapStatus(transactionStatus, fraudStatus string) domain.Status {
 		return domain.StatusPartiallyRefunded
 	default: // pending, authorize
 		return domain.StatusPending
+	}
+}
+
+// failureReason explains a failed transaction; expire and cancel get the
+// domain defaults.
+func failureReason(transactionStatus, fraudStatus string) string {
+	switch {
+	case transactionStatus == "deny" && fraudStatus == "deny":
+		return domain.FailureFraudSuspected
+	case transactionStatus == "deny":
+		return domain.FailureDeclined
+	case transactionStatus == "failure":
+		return domain.FailureProviderError
+	default:
+		return ""
 	}
 }
 

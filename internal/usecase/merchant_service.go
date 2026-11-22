@@ -108,3 +108,24 @@ func (s *MerchantService) ListCredentials(ctx context.Context, merchantID string
 func (s *MerchantService) DeleteCredential(ctx context.Context, merchantID string, p domain.Provider) error {
 	return s.creds.Delete(ctx, merchantID, p)
 }
+
+// MerchantSettings holds settings a merchant changes itself; nil fields stay
+// as they are.
+type MerchantSettings struct {
+	RequireIdempotencyKey *bool
+}
+
+func (s *MerchantService) UpdateSettings(ctx context.Context, merchantID string, in MerchantSettings) (*domain.Merchant, error) {
+	m, err := s.merchants.FindByID(ctx, merchantID)
+	if err != nil {
+		return nil, err
+	}
+	if in.RequireIdempotencyKey != nil {
+		m.RequireIdempotencyKey = *in.RequireIdempotencyKey
+	}
+	m.UpdatedAt = s.now()
+	if err := s.merchants.Update(ctx, m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}

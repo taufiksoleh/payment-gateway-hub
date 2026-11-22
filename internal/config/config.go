@@ -25,10 +25,11 @@ type Config struct {
 	ShutdownTimeout time.Duration // SHUTDOWN_TIMEOUT, 15s
 
 	// Requests per minute; 0 disables the limit.
-	RateLimitMerchantPerMin int  // RATE_LIMIT_MERCHANT_PER_MIN, 600
-	RateLimitIPPerMin       int  // RATE_LIMIT_IP_PER_MIN, 1200
-	RateLimitAdminPerMin    int  // RATE_LIMIT_ADMIN_PER_MIN, 10
-	TrustProxy              bool // TRUST_PROXY, false
+	RateLimitMerchantPerMin int    // RATE_LIMIT_MERCHANT_PER_MIN, 600
+	RateLimitIPPerMin       int    // RATE_LIMIT_IP_PER_MIN, 1200
+	RateLimitAdminPerMin    int    // RATE_LIMIT_ADMIN_PER_MIN, 10
+	TrustProxy              bool   // TRUST_PROXY, false
+	RedisURL                string // REDIS_URL; when set, rate limits are shared by all instances
 
 	// Provider base URL overrides, for staging proxies or the local mocks.
 	// Empty keeps the provider's real URL.
@@ -64,6 +65,7 @@ func Load() (Config, error) {
 
 	cfg.DBMaxOpenConns = getInt("DB_MAX_OPEN_CONNS", 20, &errs)
 	cfg.DBMaxIdleConns = getInt("DB_MAX_IDLE_CONNS", 5, &errs)
+	cfg.RedisURL = os.Getenv("REDIS_URL")
 	cfg.RateLimitMerchantPerMin = getInt("RATE_LIMIT_MERCHANT_PER_MIN", 600, &errs)
 	cfg.RateLimitIPPerMin = getInt("RATE_LIMIT_IP_PER_MIN", 1200, &errs)
 	cfg.RateLimitAdminPerMin = getInt("RATE_LIMIT_ADMIN_PER_MIN", 10, &errs)

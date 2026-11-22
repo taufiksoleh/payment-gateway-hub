@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +66,21 @@ func (e *ProviderError) Error() string {
 }
 
 func (e *ProviderError) Is(target error) bool { return target == domain.ErrProvider }
+
+// OutcomeUnknown reports whether a failed call may still have been carried
+// out by the provider: the request was sent but no clear answer came back
+// (network error, timeout, 5xx, unreadable response). Such calls must be
+// retried with the same idempotency key, never treated as rejected.
+func OutcomeUnknown(err error) bool {
+	if !errors.Is(err, domain.ErrProvider) {
+		return false
+	}
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.StatusCode == 0 || pe.StatusCode >= 500
+	}
+	return true
+}
 
 type HTTPRequest struct {
 	Method  string

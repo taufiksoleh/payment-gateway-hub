@@ -107,7 +107,7 @@ func TestRepositories(t *testing.T) {
 	}
 
 	_, _ = p.TransitionTo(domain.StatusPaid, now)
-	_ = p.ReserveRefund(300, now)
+	_ = p.ReserveRefund(domain.PendingRefund{ID: "rfd_1", Amount: 300, CreatedAt: now.Truncate(time.Microsecond)}, now)
 	if err := payments.Update(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,8 @@ func TestRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != domain.StatusPaid || got.PaidAt == nil || got.Action.QRString != "000201..." || got.Version != 2 || got.PendingRefundAmount != 300 {
+	if got.Status != domain.StatusPaid || got.PaidAt == nil || got.Action.QRString != "000201..." || got.Version != 2 || got.PendingRefundAmount != 300 ||
+		len(got.PendingRefunds) != 1 || got.PendingRefunds[0].ID != "rfd_1" {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 
@@ -182,6 +183,32 @@ func TestRepositories(t *testing.T) {
 			return mm.ID
 		}
 		storagetest.RunPaymentListContract(t, payments, fresh("a"), fresh("b"), "pay_list_"+suffix+"_")
+	})
+
+	t.Run("pending refunds contract", func(t *testing.T) {
+		storagetest.RunPendingRefundsContract(t, payments, m.ID, "pay_rfd_"+suffix+"_")
+	})
+
+	t.Run("order claims contract", func(t *testing.T) {
+		storagetest.RunOrderClaimsContract(t, postgres.NewOrderClaims(db), m.ID, "order-claim-"+suffix)
+	})
+
+	t.Run("merchant update", func(t *testing.T) {
+		mm := *m
+		mm.RequireIdempotencyKey = true
+		mm.UpdatedAt = now.Add(time.Minute)
+		if err := merchants.Update(ctx, &mm); err != nil {
+			t.Fatal(err)
+		}
+		got, err := merchants.FindByID(ctx, m.ID)
+		if err != nil || !got.RequireIdempotencyKey || !got.UpdatedAt.Equal(mm.UpdatedAt) {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+		ghost := mm
+		ghost.ID = "mch_missing_" + suffix
+		if err := merchants.Update(ctx, &ghost); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing merchant: %v", err)
+		}
 	})
 
 	t.Run("api key contract", func(t *testing.T) {

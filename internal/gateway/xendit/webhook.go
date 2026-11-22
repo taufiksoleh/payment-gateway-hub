@@ -19,6 +19,7 @@ type webhookPayload struct {
 		PaymentRequestID string `json:"payment_request_id"`
 		ReferenceID      string `json:"reference_id"`
 		Status           string `json:"status"`
+		FailureCode      string `json:"failure_code"`
 		Created          string `json:"created"`
 	} `json:"data"`
 }
@@ -42,6 +43,7 @@ func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential,
 	case strings.HasPrefix(p.Event, "payment."):
 		event.ProviderRef = p.Data.PaymentRequestID
 		event.Status = mapStatus(p.Data.Status)
+		event.FailureReason = failureReason(p.Data.FailureCode)
 		if event.Status == domain.StatusPaid {
 			event.PaidAt = gateway.ParseTime(time.RFC3339, p.Data.Created, time.UTC)
 		}

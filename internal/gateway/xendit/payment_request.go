@@ -51,6 +51,7 @@ type paymentRequestResponse struct {
 	ID            string        `json:"id"`
 	ReferenceID   string        `json:"reference_id"`
 	Status        string        `json:"status"`
+	FailureCode   string        `json:"failure_code"`
 	Actions       []action      `json:"actions"`
 	PaymentMethod paymentMethod `json:"payment_method"`
 }

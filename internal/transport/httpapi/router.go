@@ -34,6 +34,7 @@ type MerchantUsecase interface {
 	SaveCredential(ctx context.Context, merchantID string, in usecase.SaveCredentialInput) (*domain.GatewayCredential, error)
 	ListCredentials(ctx context.Context, merchantID string) ([]domain.GatewayCredential, error)
 	DeleteCredential(ctx context.Context, merchantID string, p domain.Provider) error
+	UpdateSettings(ctx context.Context, merchantID string, in usecase.MerchantSettings) (*domain.Merchant, error)
 }
 
 type WebhookUsecase interface {
@@ -84,6 +85,9 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("GET /v1/api-keys", merchant(h.listAPIKeys))
 	mux.Handle("POST /v1/api-keys/rotate", merchant(h.rotateAPIKey))
 	mux.Handle("DELETE /v1/api-keys/{id}", merchant(h.revokeAPIKey))
+
+	mux.Handle("GET /v1/settings", merchant(h.getSettings))
+	mux.Handle("PATCH /v1/settings", merchant(h.updateSettings))
 
 	mux.Handle("GET /v1/gateways", merchant(h.listGateways))
 	mux.Handle("PUT /v1/gateways/{provider}", merchant(h.saveGateway))

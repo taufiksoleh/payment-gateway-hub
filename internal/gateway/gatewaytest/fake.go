@@ -4,6 +4,7 @@ package gatewaytest
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
@@ -19,9 +20,14 @@ type Fake struct {
 	CreateErr error
 	StatusRes *gateway.StatusResult
 	RefundErr error
+	// RefundLostErr, if set, makes Refund carry out the refund but return
+	// this error, as when the provider's answer is lost on the way back.
+	RefundLostErr error
 
-	// OnRefund, if set, runs at the start of Refund (outside the lock),
-	// letting tests act while a refund is "in flight" at the provider.
+	// OnCreate and OnRefund, if set, run at the start of CreatePayment and
+	// Refund (outside the lock), letting tests act while a call is "in
+	// flight" at the provider.
+	OnCreate func()
 	OnRefund func()
 
 	mu      sync.Mutex
@@ -42,6 +48,9 @@ func (f *Fake) ValidateCredentials(cred domain.GatewayCredential) error {
 }
 
 func (f *Fake) CreatePayment(_ context.Context, _ domain.GatewayCredential, req gateway.CreatePaymentRequest) (*gateway.CreatePaymentResult, error) {
+	if f.OnCreate != nil {
+		f.OnCreate()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Creates = append(f.Creates, req)
@@ -85,11 +94,17 @@ func (f *Fake) Refund(_ context.Context, _ domain.GatewayCredential, req gateway
 	if f.RefundErr != nil {
 		return nil, f.RefundErr
 	}
-	f.Refunds = append(f.Refunds, req)
+	// Like real providers, a resent refund id is not refunded again.
+	if !slices.ContainsFunc(f.Refunds, func(r gateway.RefundRequest) bool { return r.RefundID == req.RefundID }) {
+		f.Refunds = append(f.Refunds, req)
+	}
+	if f.RefundLostErr != nil {
+		return nil, f.RefundLostErr
+	}
 	return &gateway.RefundResult{ProviderRef: "fake-refund"}, nil
 }
 
-// RefundCount returns how many refunds the provider accepted.
+// RefundCount returns how many distinct refunds the provider carried out.
 func (f *Fake) RefundCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -11,8 +11,14 @@ type Merchant struct {
 	Name          string
 	WebhookURL    string // receives payment events; empty disables delivery
 	WebhookSecret string // signs outbound webhooks
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+
+	// RequireIdempotencyKey rejects payment and refund creation without an
+	// Idempotency-Key header, so a client retry can never charge or refund
+	// twice.
+	RequireIdempotencyKey bool
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 func NewMerchant(id, name, webhookURL, webhookSecret string, now time.Time) (*Merchant, error) {

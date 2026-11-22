@@ -38,6 +38,7 @@ type Customer struct {
 
 type Action struct {
 	VirtualAccountNumber string `json:"virtual_account_number,omitempty"`
+	BillerCode           string `json:"biller_code,omitempty"`
 	QRString             string `json:"qr_string,omitempty"`
 	QRImageURL           string `json:"qr_image_url,omitempty"`
 	RedirectURL          string `json:"redirect_url,omitempty"`

@@ -30,6 +30,11 @@ func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get(IdempotencyKeyHeader)
 			if key == "" {
+				if merchantFrom(r.Context()).RequireIdempotencyKey {
+					writeProblem(w, http.StatusUnprocessableEntity, "invalid_input", IdempotencyKeyHeader,
+						"is required for this merchant")
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

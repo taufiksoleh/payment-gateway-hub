@@ -12,11 +12,18 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/id"
 )
 
-// maxUpdateAttempts bounds retries after losing the optimistic lock.
-const maxUpdateAttempts = 3
+const (
+	// maxUpdateAttempts bounds retries after losing the optimistic lock.
+	maxUpdateAttempts = 3
+
+	// orderClaimTTL outlasts the provider HTTP timeout, so a claim is only
+	// taken over once its holder has certainly given up.
+	orderClaimTTL = 2 * time.Minute
+)
 
 type PaymentService struct {
 	payments PaymentRepository
+	claims   OrderClaims
 	creds    CredentialRepository
 	gateways GatewayResolver
 	log      *slog.Logger
@@ -25,6 +32,7 @@ type PaymentService struct {
 
 type PaymentServiceDeps struct {
 	Payments PaymentRepository
+	Claims   OrderClaims
 	Creds    CredentialRepository
 	Gateways GatewayResolver
 	Logger   *slog.Logger     // optional
@@ -40,6 +48,7 @@ func NewPaymentService(d PaymentServiceDeps) *PaymentService {
 	}
 	return &PaymentService{
 		payments: d.Payments,
+		claims:   d.Claims,
 		creds:    d.Creds,
 		gateways: d.Gateways,
 		log:      d.Logger,
@@ -61,14 +70,11 @@ type CreatePaymentInput struct {
 }
 
 // Create opens a payment at the provider. A repeated order id returns the
-// existing payment instead of charging again.
+// existing payment instead of charging again, and a concurrent create for the
+// same order is refused with domain.ErrConflict before reaching the provider.
 func (s *PaymentService) Create(ctx context.Context, merchantID string, in CreatePaymentInput) (*domain.Payment, error) {
-	existing, err := s.payments.FindByOrderID(ctx, merchantID, in.OrderID)
-	if err == nil {
-		return existing, nil
-	}
-	if !errors.Is(err, domain.ErrNotFound) {
-		return nil, err
+	if existing, err := s.findOrder(ctx, merchantID, in.OrderID); existing != nil || err != nil {
+		return existing, err
 	}
 
 	p, err := domain.NewPayment(domain.NewPaymentParams{
@@ -91,6 +97,24 @@ func (s *PaymentService) Create(ctx context.Context, merchantID string, in Creat
 	gw, cred, err := s.gatewayFor(ctx, merchantID, p.Provider)
 	if err != nil {
 		return nil, err
+	}
+
+	now := s.now()
+	claimed, err := s.claims.Claim(ctx, merchantID, p.OrderID, now, now.Add(orderClaimTTL))
+	if err != nil {
+		return nil, fmt.Errorf("claim order: %w", err)
+	}
+	if !claimed {
+		return nil, fmt.Errorf("%w: a payment for order %q is being created, retry shortly", domain.ErrConflict, p.OrderID)
+	}
+	defer func() {
+		if err := s.claims.Release(context.WithoutCancel(ctx), merchantID, p.OrderID); err != nil {
+			s.log.WarnContext(ctx, "release order claim", "order_id", p.OrderID, "error", err)
+		}
+	}()
+	// The previous holder may have finished between the lookup and the claim.
+	if existing, err := s.findOrder(ctx, merchantID, p.OrderID); existing != nil || err != nil {
+		return existing, err
 	}
 
 	// The provider is called before saving, so a failed call leaves nothing
@@ -116,7 +140,7 @@ func (s *PaymentService) Create(ctx context.Context, merchantID string, in Creat
 		p.ExpiresAt = res.ExpiresAt
 	}
 	if res.Status != "" && res.Status != domain.StatusPending {
-		if _, err := p.TransitionTo(res.Status, s.now()); err != nil {
+		if _, err := p.TransitionWithReason(res.Status, res.FailureReason, s.now()); err != nil {
 			s.log.WarnContext(ctx, "ignoring provider status on create", "payment_id", p.ID, "error", err)
 		}
 	}
@@ -125,6 +149,15 @@ func (s *PaymentService) Create(ctx context.Context, merchantID string, in Creat
 		return nil, fmt.Errorf("save payment: %w", err)
 	}
 	return p, nil
+}
+
+// findOrder returns the merchant's payment for orderID, or nil if none exists.
+func (s *PaymentService) findOrder(ctx context.Context, merchantID, orderID string) (*domain.Payment, error) {
+	p, err := s.payments.FindByOrderID(ctx, merchantID, orderID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, nil
+	}
+	return p, err
 }
 
 // Get hides payments of other merchants behind domain.ErrNotFound.
@@ -158,7 +191,7 @@ func (s *PaymentService) Sync(ctx context.Context, merchantID, paymentID string)
 	if err != nil {
 		return nil, fmt.Errorf("get status from %s: %w", p.Provider, err)
 	}
-	if err := s.applyStatus(ctx, p, statusUpdate{Status: res.Status, PaidAt: res.PaidAt}); err != nil {
+	if err := s.applyStatus(ctx, p, statusUpdate{Status: res.Status, FailureReason: res.FailureReason, PaidAt: res.PaidAt}); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -172,6 +205,10 @@ type RefundInput struct {
 // Refund reserves the amount on the payment before calling the provider. A
 // concurrent refund then loses the optimistic lock, reloads, sees the
 // reservation and fails validation without reaching the provider.
+//
+// If the provider's answer is lost (timeout, 5xx), the reservation is kept
+// and ReconcileRefunds retries the same refund later; the provider dedupes
+// it by refund id.
 func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID string, in RefundInput) (*domain.Payment, error) {
 	p, err := s.Get(ctx, merchantID, paymentID)
 	if err != nil {
@@ -184,17 +221,14 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		return nil, err
 	}
 
-	gw, cred, err := s.gatewayFor(ctx, merchantID, p.Provider)
+	refunder, cred, err := s.refunderFor(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	refunder, ok := gw.(gateway.Refunder)
-	if !ok {
-		return nil, fmt.Errorf("%w: %s refunds must be done in the provider dashboard", domain.ErrUnsupported, p.Provider)
-	}
 
+	refund := domain.PendingRefund{ID: id.New("rfd"), Amount: in.Amount, Reason: in.Reason, CreatedAt: s.now()}
 	if err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
-		return true, p.ReserveRefund(in.Amount, s.now())
+		return true, p.ReserveRefund(refund, s.now())
 	}); err != nil {
 		return nil, err
 	}
@@ -202,32 +236,121 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 	// The reservation must be settled even if the client disconnects.
 	ctx = context.WithoutCancel(ctx)
 
-	_, err = refunder.Refund(ctx, *cred, gateway.RefundRequest{
-		RefundID: id.New("rfd"),
-		Ref:      gateway.PaymentRef{PaymentID: p.ID, ProviderRef: p.ProviderRef},
-		Amount:   in.Amount,
-		Reason:   in.Reason,
-	})
-	if err != nil {
+	if err := s.sendRefund(ctx, refunder, *cred, p, refund); err != nil {
+		if gateway.OutcomeUnknown(err) {
+			s.log.WarnContext(ctx, "refund outcome unknown, will retry", "payment_id", p.ID, "refund_id", refund.ID, "error", err)
+			return nil, fmt.Errorf("refund at %s: outcome unknown, it will be retried automatically: %w", p.Provider, err)
+		}
 		if rerr := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
-			return true, p.ReleaseRefund(in.Amount, s.now())
+			return true, p.ReleaseRefund(refund.ID, s.now())
 		}); rerr != nil {
 			s.log.ErrorContext(ctx, "refund failed and reservation could not be released",
-				"payment_id", p.ID, "amount", in.Amount, "error", rerr)
+				"payment_id", p.ID, "refund_id", refund.ID, "error", rerr)
 		}
 		return nil, fmt.Errorf("refund at %s: %w", p.Provider, err)
 	}
 
-	if err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
-		return true, p.CompleteRefund(in.Amount, s.now())
-	}); err != nil {
-		// The money went back but stays reserved, so it cannot be refunded
-		// twice. Needs manual reconciliation.
+	if err := s.completeRefund(ctx, p, refund.ID); err != nil {
+		// The money went back but stays reserved, so it can't be refunded
+		// twice. ReconcileRefunds records it on its next run.
 		s.log.ErrorContext(ctx, "refund accepted by provider but not recorded",
-			"payment_id", p.ID, "amount", in.Amount, "error", err)
+			"payment_id", p.ID, "refund_id", refund.ID, "error", err)
 		return nil, err
 	}
 	return p, nil
+}
+
+// ReconcileRefunds settles refund reservations older than olderThan, left
+// behind when the provider's answer was lost or the hub stopped mid-refund.
+// Each refund is resent with its original id, which the provider dedupes,
+// and recorded once the provider accepts it. A refund the provider rejects is
+// left reserved and logged for manual review, since the rejection may mean
+// the first attempt already went through. It returns how many refunds it
+// recorded.
+func (s *PaymentService) ReconcileRefunds(ctx context.Context, olderThan time.Duration) (int, error) {
+	const pageSize = 100
+	cutoff := s.now().Add(-olderThan)
+	recorded := 0
+	// Page through all of them: refunds that can't be resolved stay listed,
+	// and must not crowd out the ones that can.
+	for after := ""; ; {
+		payments, err := s.payments.ListWithPendingRefunds(ctx, cutoff, after, pageSize)
+		if err != nil {
+			return recorded, err
+		}
+		for i := range payments {
+			recorded += s.reconcilePayment(ctx, &payments[i], cutoff)
+		}
+		if len(payments) < pageSize || ctx.Err() != nil {
+			return recorded, ctx.Err()
+		}
+		after = payments[len(payments)-1].ID
+	}
+}
+
+// reconcilePayment resends p's refunds created before cutoff and returns
+// how many it recorded.
+func (s *PaymentService) reconcilePayment(ctx context.Context, p *domain.Payment, cutoff time.Time) int {
+	refunder, cred, err := s.refunderFor(ctx, p)
+	if err != nil {
+		s.log.ErrorContext(ctx, "cannot reconcile refunds", "payment_id", p.ID, "error", err)
+		return 0
+	}
+	recorded := 0
+	for _, r := range p.PendingRefunds {
+		if r.CreatedAt.After(cutoff) {
+			continue
+		}
+		log := s.log.With("payment_id", p.ID, "refund_id", r.ID, "amount", r.Amount)
+		if err := s.sendRefund(ctx, refunder, *cred, p, r); err != nil {
+			if gateway.OutcomeUnknown(err) {
+				log.WarnContext(ctx, "refund still unresolved, will retry", "error", err)
+			} else {
+				log.ErrorContext(ctx, "refund retry rejected, check the provider dashboard", "error", err)
+			}
+			continue
+		}
+		if err := s.completeRefund(ctx, p, r.ID); err != nil {
+			log.ErrorContext(ctx, "refund accepted by provider but not recorded", "error", err)
+			continue
+		}
+		log.InfoContext(ctx, "refund reconciled")
+		recorded++
+	}
+	return recorded
+}
+
+func (s *PaymentService) refunderFor(ctx context.Context, p *domain.Payment) (gateway.Refunder, *domain.GatewayCredential, error) {
+	gw, cred, err := s.gatewayFor(ctx, p.MerchantID, p.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	refunder, ok := gw.(gateway.Refunder)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %s refunds must be done in the provider dashboard", domain.ErrUnsupported, p.Provider)
+	}
+	return refunder, cred, nil
+}
+
+func (s *PaymentService) sendRefund(ctx context.Context, refunder gateway.Refunder, cred domain.GatewayCredential, p *domain.Payment, r domain.PendingRefund) error {
+	_, err := refunder.Refund(ctx, cred, gateway.RefundRequest{
+		RefundID: r.ID,
+		Ref:      gateway.PaymentRef{PaymentID: p.ID, ProviderRef: p.ProviderRef},
+		Amount:   r.Amount,
+		Reason:   r.Reason,
+	})
+	return err
+}
+
+// completeRefund records an accepted refund. A refund already recorded by a
+// concurrent request or reconciler run is not an error.
+func (s *PaymentService) completeRefund(ctx context.Context, p *domain.Payment, refundID string) error {
+	return s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+		if _, ok := p.PendingRefund(refundID); !ok {
+			return false, nil
+		}
+		return true, p.CompleteRefund(refundID, s.now())
+	})
 }
 
 func (s *PaymentService) gatewayFor(ctx context.Context, merchantID string, provider domain.Provider) (gateway.Gateway, *domain.GatewayCredential, error) {
@@ -247,9 +370,10 @@ func (s *PaymentService) gatewayFor(ctx context.Context, merchantID string, prov
 
 // statusUpdate is a status reported by a provider webhook or sync.
 type statusUpdate struct {
-	Status      domain.Status
-	PaidAt      *time.Time
-	ProviderRef string
+	Status        domain.Status
+	FailureReason string
+	PaidAt        *time.Time
+	ProviderRef   string
 }
 
 // applyStatus saves the reported status. Transitions the state machine
@@ -262,7 +386,7 @@ func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, u s
 		if u.Status == domain.StatusPaid && u.PaidAt != nil && p.Status.CanTransitionTo(domain.StatusPaid) {
 			p.PaidAt = u.PaidAt // set before the transition so the event carries it
 		}
-		return p.TransitionTo(u.Status, s.now())
+		return p.TransitionWithReason(u.Status, u.FailureReason, s.now())
 	})
 	if errors.Is(err, domain.ErrInvalidTransition) {
 		s.log.InfoContext(ctx, "ignoring status update", "payment_id", p.ID, "error", err)

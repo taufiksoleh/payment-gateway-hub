@@ -67,10 +67,11 @@ func (g *Gateway) CreatePayment(ctx context.Context, cred domain.GatewayCredenti
 		return nil, err
 	}
 	return &gateway.CreatePaymentResult{
-		ProviderRef: res.ID,
-		Status:      mapStatus(res.Status),
-		Action:      res.action(),
-		ExpiresAt:   res.expiresAt(),
+		ProviderRef:   res.ID,
+		Status:        mapStatus(res.Status),
+		FailureReason: failureReason(res.FailureCode),
+		Action:        res.action(),
+		ExpiresAt:     res.expiresAt(),
 	}, nil
 }
 
@@ -83,7 +84,7 @@ func (g *Gateway) GetStatus(ctx context.Context, cred domain.GatewayCredential, 
 	if err := g.call(ctx, cred, http.MethodGet, path, "", nil, &res); err != nil {
 		return nil, err
 	}
-	return &gateway.StatusResult{ProviderRef: res.ID, Status: mapStatus(res.Status)}, nil
+	return &gateway.StatusResult{ProviderRef: res.ID, Status: mapStatus(res.Status), FailureReason: failureReason(res.FailureCode)}, nil
 }
 
 // Refund works for e-wallets and QRIS; Xendit rejects virtual accounts and
@@ -132,6 +133,19 @@ func (g *Gateway) call(ctx context.Context, cred domain.GatewayCredential, metho
 		return &gateway.ProviderError{Provider: domain.ProviderXendit, StatusCode: resp.StatusCode, Message: msg}
 	}
 	return gateway.DecodeJSON(domain.ProviderXendit, resp.Body, out)
+}
+
+// failureReason maps a payment request failure_code; codes it doesn't know
+// count as declined.
+func failureReason(code string) string {
+	switch code {
+	case "":
+		return ""
+	case "INSUFFICIENT_BALANCE":
+		return domain.FailureInsufficientBalance
+	default:
+		return domain.FailureDeclined
+	}
 }
 
 func mapStatus(s string) domain.Status {

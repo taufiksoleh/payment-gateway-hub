@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
@@ -21,6 +23,25 @@ type fixture struct {
 	fake     *gatewaytest.Fake
 	outbox   *memory.Outbox // merchant notifications land here
 	merchant *domain.Merchant
+	clock    *clock
+}
+
+// clock is the service's time source; tests move it forward.
+type clock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
 }
 
 // events returns the types of every webhook queued in the outbox.
@@ -70,12 +91,15 @@ func setupWithRepo(t *testing.T, newRepo func(*memory.Outbox) usecase.PaymentRep
 		t.Fatal(err)
 	}
 
+	clk := &clock{t: time.Now()}
 	payments := usecase.NewPaymentService(usecase.PaymentServiceDeps{
 		Payments: newRepo(ob),
+		Claims:   memory.NewOrderClaims(),
 		Creds:    credRepo,
 		Gateways: registry,
+		Now:      clk.now,
 	})
-	return &fixture{payments: payments, fake: fake, outbox: ob, merchant: reg.Merchant}
+	return &fixture{payments: payments, fake: fake, outbox: ob, merchant: reg.Merchant, clock: clk}
 }
 
 func createInput(orderID string) usecase.CreatePaymentInput {
@@ -241,5 +265,62 @@ func paidWebhook(t *testing.T, f *fixture, paymentID string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Two creates for one order without an Idempotency-Key: the second arrives
+// while the first is at the provider and must not reach the provider too.
+func TestCreate_ConcurrentSameOrderCallsProviderOnce(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+
+	var secondErr error
+	f.fake.OnCreate = func() {
+		f.fake.OnCreate = nil
+		_, secondErr = f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
+	}
+	first, err := f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(secondErr, domain.ErrConflict) {
+		t.Fatalf("concurrent create: got %v, want ErrConflict", secondErr)
+	}
+	if len(f.fake.Creates) != 1 {
+		t.Fatalf("provider creates = %d, want 1", len(f.fake.Creates))
+	}
+
+	// Once the first finishes, a retry returns its payment.
+	again, err := f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
+	if err != nil || again.ID != first.ID {
+		t.Fatalf("retry after create: %v, id %s want %s", err, again.ID, first.ID)
+	}
+}
+
+func TestCreate_FailedProviderCallReleasesOrder(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.fake.CreateErr = &gateway.ProviderError{Provider: fakeProvider, StatusCode: 400, Message: "bad"}
+	if _, err := f.payments.Create(ctx, f.merchant.ID, createInput("order-1")); err == nil {
+		t.Fatal("expected error")
+	}
+	f.fake.CreateErr = nil
+	if _, err := f.payments.Create(ctx, f.merchant.ID, createInput("order-1")); err != nil {
+		t.Fatalf("order stayed claimed after a failed create: %v", err)
+	}
+}
+
+func TestFailureReason_FromWebhookAndSync(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	p, _ := f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
+
+	f.fake.StatusRes = &gateway.StatusResult{Status: domain.StatusFailed, FailureReason: domain.FailureInsufficientBalance}
+	got, err := f.payments.Sync(ctx, f.merchant.ID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FailureReason != domain.FailureInsufficientBalance {
+		t.Fatalf("failure_reason = %q", got.FailureReason)
 	}
 }

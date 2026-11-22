@@ -50,10 +50,11 @@ type CreatePaymentRequest struct {
 }
 
 type CreatePaymentResult struct {
-	ProviderRef string
-	Status      domain.Status
-	Action      domain.PaymentAction
-	ExpiresAt   time.Time
+	ProviderRef   string
+	Status        domain.Status
+	FailureReason string // one of the domain.Failure* reasons, when Status failed
+	Action        domain.PaymentAction
+	ExpiresAt     time.Time
 }
 
 // PaymentRef carries both ids; each adapter uses the one its API needs.
@@ -63,9 +64,10 @@ type PaymentRef struct {
 }
 
 type StatusResult struct {
-	ProviderRef string
-	Status      domain.Status
-	PaidAt      *time.Time
+	ProviderRef   string
+	Status        domain.Status
+	FailureReason string // one of the domain.Failure* reasons, when Status failed
+	PaidAt        *time.Time
 }
 
 type WebhookRequest struct {
@@ -75,14 +77,15 @@ type WebhookRequest struct {
 }
 
 type WebhookEvent struct {
-	PaymentID   string
-	ProviderRef string
-	Status      domain.Status
-	PaidAt      *time.Time
+	PaymentID     string
+	ProviderRef   string
+	Status        domain.Status
+	FailureReason string // one of the domain.Failure* reasons, when Status failed
+	PaidAt        *time.Time
 }
 
 type RefundRequest struct {
-	RefundID string // provider idempotency key
+	RefundID string // provider idempotency key: resending the same id must not refund twice
 	Ref      PaymentRef
 	Amount   int64
 	Reason   string

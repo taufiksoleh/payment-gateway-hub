@@ -225,3 +225,54 @@ func TestIdempotency_InvalidKey(t *testing.T) {
 		}
 	}
 }
+
+func TestIdempotency_MerchantCanRequireKey(t *testing.T) {
+	srv := newServer(t)
+	apiKey, paymentID := merchantWithPaidPayment(t, srv, "Toko")
+
+	var settings struct {
+		RequireIdempotencyKey bool `json:"require_idempotency_key"`
+	}
+	if code := call(t, srv, "GET", "/v1/settings", apiKey, nil, nil, &settings); code != 200 || settings.RequireIdempotencyKey {
+		t.Fatalf("default settings: %d %+v", code, settings)
+	}
+	if code := call(t, srv, "PATCH", "/v1/settings", apiKey, nil, map[string]bool{"require_idempotency_key": true}, &settings); code != 200 || !settings.RequireIdempotencyKey {
+		t.Fatalf("enable: %d %+v", code, settings)
+	}
+
+	refunds := "/v1/payments/" + paymentID + "/refunds"
+	if r := do(t, srv, "POST", refunds, apiKey, "", map[string]any{"amount": 1000}); r.status != 422 || !strings.Contains(string(r.body), "Idempotency-Key") {
+		t.Fatalf("refund without key: %d %s", r.status, r.body)
+	}
+	if r := do(t, srv, "POST", "/v1/payments", apiKey, "", paymentBody("INV-2")); r.status != 422 {
+		t.Fatalf("payment without key: %d %s", r.status, r.body)
+	}
+	if r := do(t, srv, "POST", refunds, apiKey, "refund-1", map[string]any{"amount": 1000}); r.status != 200 {
+		t.Fatalf("refund with key: %d %s", r.status, r.body)
+	}
+
+	// Other endpoints are unaffected, and the setting can be turned off.
+	if code := call(t, srv, "PATCH", "/v1/settings", apiKey, nil, map[string]bool{"require_idempotency_key": false}, nil); code != 200 {
+		t.Fatalf("disable: %d", code)
+	}
+	if r := do(t, srv, "POST", "/v1/payments", apiKey, "", paymentBody("INV-3")); r.status != 201 {
+		t.Fatalf("payment without key after disabling: %d %s", r.status, r.body)
+	}
+}
+
+func TestCreatePayment_ConcurrentSameOrderIsConflict(t *testing.T) {
+	srv, fake := newServerWithFake(t)
+	apiKey, _ := merchantWithPaidPayment(t, srv, "Toko")
+
+	var second response
+	fake.OnCreate = func() {
+		fake.OnCreate = nil
+		second = do(t, srv, "POST", "/v1/payments", apiKey, "", paymentBody("INV-9"))
+	}
+	if r := do(t, srv, "POST", "/v1/payments", apiKey, "", paymentBody("INV-9")); r.status != 201 {
+		t.Fatalf("first: %d %s", r.status, r.body)
+	}
+	if second.status != 409 || second.errorCode(t) != "conflict" {
+		t.Fatalf("concurrent create: %d %s", second.status, second.body)
+	}
+}

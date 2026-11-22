@@ -57,6 +57,7 @@ func newTestServer(t *testing.T, opts ...func(*httpapi.Deps)) *testServer {
 		}),
 		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
 			Payments: memory.NewPaymentRepo(ob),
+			Claims:   memory.NewOrderClaims(),
 			Creds:    credRepo,
 			Gateways: registry,
 			Logger:   log,

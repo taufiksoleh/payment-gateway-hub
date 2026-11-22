@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
@@ -58,12 +59,12 @@ func TestRefund_SecondRefundWhileFirstIsInFlight(t *testing.T) {
 	}
 }
 
-func TestRefund_ProviderFailureReleasesReservation(t *testing.T) {
+func TestRefund_ProviderRejectionReleasesReservation(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	p := paidPayment(t, f)
 
-	f.fake.RefundErr = &gateway.ProviderError{Provider: fakeProvider, StatusCode: 500, Message: "down"}
+	f.fake.RefundErr = &gateway.ProviderError{Provider: fakeProvider, StatusCode: 400, Message: "not refundable"}
 	if _, err := f.payments.Refund(ctx, f.merchant.ID, p.ID, usecase.RefundInput{}); !errors.Is(err, domain.ErrProvider) {
 		t.Fatalf("got %v, want ErrProvider", err)
 	}
@@ -73,10 +74,69 @@ func TestRefund_ProviderFailureReleasesReservation(t *testing.T) {
 		t.Fatalf("reservation not released: %+v", got)
 	}
 
-	// Once the provider recovers, the refund goes through.
 	f.fake.RefundErr = nil
 	if _, err := f.payments.Refund(ctx, f.merchant.ID, p.ID, usecase.RefundInput{}); err != nil {
 		t.Fatalf("retry failed: %v", err)
+	}
+}
+
+// The provider refunds but its answer is lost. The reservation must stay, so
+// the money can't be refunded again, until the reconciler resends the same
+// refund id and records the result.
+func TestRefund_LostAnswerIsReconciledWithoutRefundingTwice(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	p := paidPayment(t, f)
+
+	f.fake.RefundLostErr = &gateway.ProviderError{Provider: fakeProvider, StatusCode: 504, Message: "gateway timeout"}
+	if _, err := f.payments.Refund(ctx, f.merchant.ID, p.ID, usecase.RefundInput{}); !errors.Is(err, domain.ErrProvider) {
+		t.Fatalf("got %v, want ErrProvider", err)
+	}
+	got, _ := f.payments.Get(ctx, f.merchant.ID, p.ID)
+	if got.PendingRefundAmount != 50000 || got.RefundableAmount() != 0 {
+		t.Fatalf("reservation released on an unknown outcome: %+v", got)
+	}
+	if _, err := f.payments.Refund(ctx, f.merchant.ID, p.ID, usecase.RefundInput{}); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("second refund while unresolved: got %v, want ErrInvalidInput", err)
+	}
+
+	f.fake.RefundLostErr = nil
+	if n, err := f.payments.ReconcileRefunds(ctx, 5*time.Minute); err != nil || n != 0 {
+		t.Fatalf("recent refund reconciled early: n=%d err=%v", n, err)
+	}
+	f.clock.advance(10 * time.Minute)
+	if n, err := f.payments.ReconcileRefunds(ctx, 5*time.Minute); err != nil || n != 1 {
+		t.Fatalf("reconcile: n=%d err=%v", n, err)
+	}
+
+	got, _ = f.payments.Get(ctx, f.merchant.ID, p.ID)
+	if got.Status != domain.StatusRefunded || got.PendingRefundAmount != 0 || len(got.PendingRefunds) != 0 {
+		t.Fatalf("after reconcile: %+v", got)
+	}
+	if f.fake.RefundCount() != 1 || len(f.fake.Refunds) != 1 {
+		t.Fatalf("provider refunded %d times, want 1", f.fake.RefundCount())
+	}
+	if n, _ := f.payments.ReconcileRefunds(ctx, 5*time.Minute); n != 0 {
+		t.Fatalf("second reconcile recorded %d", n)
+	}
+}
+
+func TestReconcileRefunds_LeavesRejectedRetryReserved(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	p := paidPayment(t, f)
+
+	f.fake.RefundErr = errors.Join(domain.ErrProvider, errors.New("connection reset"))
+	_, _ = f.payments.Refund(ctx, f.merchant.ID, p.ID, usecase.RefundInput{Amount: 10000})
+
+	f.clock.advance(10 * time.Minute)
+	f.fake.RefundErr = &gateway.ProviderError{Provider: fakeProvider, StatusCode: 406, Message: "duplicate refund id"}
+	if n, err := f.payments.ReconcileRefunds(ctx, 5*time.Minute); err != nil || n != 0 {
+		t.Fatalf("reconcile: n=%d err=%v", n, err)
+	}
+	got, _ := f.payments.Get(ctx, f.merchant.ID, p.ID)
+	if got.PendingRefundAmount != 10000 || got.RefundableAmount() != 40000 {
+		t.Fatalf("a rejected retry must stay reserved for review: %+v", got)
 	}
 }
 

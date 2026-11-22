@@ -21,6 +21,19 @@ type PaymentRepository interface {
 	FindByOrderID(ctx context.Context, merchantID, orderID string) (*domain.Payment, error)
 	// List returns matches ordered by (created_at, id) descending.
 	List(ctx context.Context, merchantID string, f PaymentFilter) ([]domain.Payment, error)
+	// ListWithPendingRefunds returns up to limit payments with pending refunds
+	// that were last updated before the given time, ordered by id and starting
+	// after afterID, so callers can page through all of them.
+	ListWithPendingRefunds(ctx context.Context, updatedBefore time.Time, afterID string, limit int) ([]domain.Payment, error)
+}
+
+// OrderClaims stops two requests from creating a payment for the same order
+// at the same time. A claim lapses at until, so a crashed request can't block
+// the order for good.
+type OrderClaims interface {
+	// Claim returns false if another unexpired claim holds the order.
+	Claim(ctx context.Context, merchantID, orderID string, now, until time.Time) (bool, error)
+	Release(ctx context.Context, merchantID, orderID string) error
 }
 
 // PaymentFilter fields are optional; zero values match everything.
@@ -37,6 +50,7 @@ type PaymentFilter struct {
 
 type MerchantRepository interface {
 	Create(ctx context.Context, m *domain.Merchant) error
+	Update(ctx context.Context, m *domain.Merchant) error
 	FindByID(ctx context.Context, id string) (*domain.Merchant, error)
 }
 

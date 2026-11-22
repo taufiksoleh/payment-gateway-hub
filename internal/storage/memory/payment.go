@@ -5,6 +5,8 @@ package memory
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,6 +114,19 @@ func (r *PaymentRepo) List(_ context.Context, merchantID string, f usecase.Payme
 		}
 	}
 	return pageNewestFirst(matches, paymentKey, cursor, f.Limit), nil
+}
+
+func (r *PaymentRepo) ListWithPendingRefunds(_ context.Context, updatedBefore time.Time, afterID string, limit int) ([]domain.Payment, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []domain.Payment
+	for _, p := range r.byID {
+		if len(p.PendingRefunds) > 0 && p.UpdatedAt.Before(updatedBefore) && p.ID > afterID {
+			out = append(out, p)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.Payment) int { return strings.Compare(a.ID, b.ID) })
+	return out[:min(len(out), limit)], nil
 }
 
 func paymentKey(p domain.Payment) (time.Time, string) { return p.CreatedAt, p.ID }

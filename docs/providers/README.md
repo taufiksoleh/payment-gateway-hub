@@ -71,6 +71,22 @@ MIDTRANS_SANDBOX_URL=https://api.sandbox.midtrans.com make up
 
 Xendit and DOKU already talk to their real sandboxes in the Docker stack.
 
+## Checking the adapters against your sandbox
+
+`make sandbox-test` calls each vendor's real sandbox directly, without the
+hub server or a tunnel: it creates a Rp10,000 BCA virtual account payment
+and reads its status back. Put your sandbox keys in `.env` (it's git-ignored)
+or the environment; vendors without keys are skipped.
+
+| Variable | Where it comes from |
+|---|---|
+| `MIDTRANS_SANDBOX_SERVER_KEY` | Midtrans sandbox dashboard → Settings → Access Keys |
+| `XENDIT_SANDBOX_SECRET_KEY`, `XENDIT_SANDBOX_CALLBACK_TOKEN` | Xendit test mode → Settings → API Keys / Webhooks |
+| `DOKU_SANDBOX_CLIENT_ID`, `DOKU_SANDBOX_SECRET_KEY` | DOKU sandbox dashboard → Integration → Credentials |
+
+A failure prints the vendor's own error message, which shows exactly which
+field the adapter gets wrong.
+
 ## When something goes wrong
 
 The hub's error codes point at the cause:
@@ -87,6 +103,6 @@ The hub's error codes point at the cause:
 | Payment stays `pending` after paying | The notification URL isn't set or isn't reachable | Fix the URL; meanwhile `POST /v1/payments/{id}/sync` pulls the status |
 
 > **Status:** the adapters follow each provider's documentation and are
-> tested against recorded responses. They have **not yet been run against
-> live sandbox accounts**. If a real sandbox rejects a field, please open an
-> issue with the provider's error message.
+> tested against recorded responses. The project hasn't yet run
+> `make sandbox-test` against live accounts. If a real sandbox rejects a
+> field, please open an issue with the provider's error message.

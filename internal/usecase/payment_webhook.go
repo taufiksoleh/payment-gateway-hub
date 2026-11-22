@@ -39,8 +39,9 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, provider domain.Prov
 		return fmt.Errorf("%w: payment %s does not belong to this webhook", domain.ErrNotFound, p.ID)
 	}
 	return s.applyStatus(ctx, p, statusUpdate{
-		Status:      event.Status,
-		PaidAt:      event.PaidAt,
-		ProviderRef: event.ProviderRef,
+		Status:        event.Status,
+		FailureReason: event.FailureReason,
+		PaidAt:        event.PaidAt,
+		ProviderRef:   event.ProviderRef,
 	})
 }
