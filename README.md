@@ -416,6 +416,7 @@ Further reading:
 - [docs/providers](docs/providers/README.md): setting up Midtrans, Xendit and DOKU
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): layers, the dependency rule, SOLID in this codebase, and request flows
 - [docs/ADDING_A_GATEWAY.md](docs/ADDING_A_GATEWAY.md): a step-by-step guide to adding a vendor by hand
+- [docs/ROADMAP.md](docs/ROADMAP.md): planned work, ordered by the merchant problem each step solves
 
 ## Development
 
@@ -447,4 +448,5 @@ This is a solid foundation, not yet production-certified. Before going live:
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
 - **Rate limits are per instance.** Buckets live in memory, so N hub instances allow up to N times each limit. Implement `ratelimit.Limiter` on a shared store (such as Redis) if you need exact global limits.
 - **`failure_reason`** is part of the API but not yet filled from provider responses.
-- **Not yet built:** metrics.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.

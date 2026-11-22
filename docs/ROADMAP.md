@@ -1,0 +1,216 @@
+# Roadmap
+
+What to build next, ordered by the merchant problems each step solves. The hub
+already covers the basics: one API over Midtrans, Xendit and DOKU, signed
+webhooks that are never lost, safe retries, refunds, rate limits, metrics and
+request logs. The steps below turn it from "one API for three gateways" into
+something that keeps sales flowing, explains where the money went, and costs
+less to run.
+
+Last reviewed: November 2026.
+
+## Principles
+
+These hold for every step and decide what we do *not* build.
+
+- **The hub never holds money.** Funds always flow directly between the
+  merchant's own gateway account and the customer. Holding or forwarding funds
+  would make the hub a payment service provider, which needs a Bank Indonesia
+  licence. Payouts, splits and escrow are therefore out of scope; they belong
+  to the gateways.
+- **No raw card data.** Cards stay tokenized at the gateway, which keeps the
+  hub out of PCI DSS scope.
+- **Merchants keep their own gateway contracts.** The hub adds value through
+  routing, visibility and a single integration, not by reselling rates.
+- **Every new capability is a port plus adapters**, as described in
+  [ARCHITECTURE.md](ARCHITECTURE.md), so each piece can be written and tested
+  by hand.
+
+## Overview
+
+| Phase | Merchant problem | Main deliverables | Size |
+|---|---|---|---|
+| 0 | "Can I trust this in production?" | Sandbox verification, failure reasons, refund reconciliation, Redis limiter | M |
+| 1 | "A gateway outage costs me sales" | Multi-provider failover, health tracking, routing rules | L |
+| 2 | "I can't tell where my money is" | Settlement import, automatic reconciliation, fee tracking, exports | L |
+| 3 | "My customers want to pay differently" | Payment links, hosted checkout, recurring payments | L |
+| 4 | "Fees eat my margin" | Fee tables, cost-aware routing, QRIS zero-MDR routing | M |
+| 5 | "Integration takes too long" | OpenAPI spec, SDKs, e-commerce plugins, merchant dashboard | L |
+| 6 | "Am I compliant?" | PDP data retention and erasure, audit log, SNAP readiness, KMS | M |
+| — | "My gateway isn't supported" | More adapters, as demand appears | S each |
+
+Phases 1 and 2 are the core value of a hub: a single gateway can't fail over
+to its competitor, and it can't reconcile across providers. Phase 0 comes first
+because those features are useless if the base isn't verified.
+
+## Phase 0: production readiness
+
+The README's known limitations, closed.
+
+| Item | Why | Notes |
+|---|---|---|
+| Verify all three adapters against live sandbox accounts | Shapes are tested only against recorded-style responses | Add a `make sandbox-test` target that runs opt-in tests with real sandbox keys from the environment |
+| Fill `failure_reason` from provider responses | Merchants can't tell a declined e-wallet from an expired VA | Map each provider's codes onto a small shared set (`insufficient_balance`, `expired`, `declined`, `provider_error`) |
+| Background refund reconciliation | A crash between "provider accepted" and "hub recorded" leaves money in `pending_refund_amount` | Periodic job: for each stale reservation, query the provider's refund status, then complete or release |
+| Require `Idempotency-Key`, optionally per merchant | Retries without it can refund twice | Merchant setting; off by default for compatibility |
+| Claim `order_id` before calling the provider | Two concurrent creates can both reach the provider | Reserve the row in a `creating` state, then call the provider |
+| Shared rate limiter (Redis) | Limits are per instance today | New `ratelimit.Limiter` adapter; no other code changes |
+| Midtrans Mandiri bill payment (`echannel`) | Mandiri is one of the largest VA banks | Adapter-only change |
+| CI builds and scans the Docker image | Images are built only locally | Add a GitHub Actions job: build, run Trivy, push on tag |
+
+## Phase 1: never lose a sale to an outage
+
+**Problem.** Gateways do go down. Xendit's status page, for example, recorded
+a QR payments disruption in Indonesia in May 2026. With one gateway, every
+payment during that window fails. A merchant connected through the hub
+usually holds accounts with several gateways but still has to switch between
+them by hand.
+
+**Build.**
+
+1. **Provider health.** Track success rate and latency per provider and
+   channel from data the hub already records (`hub_provider_requests_total`).
+   Add a circuit breaker per channel: after N consecutive provider errors,
+   mark it unhealthy for a cool-down period.
+2. **Failover on create.** When `CreatePayment` fails with a provider error
+   (never on a validation error) and the merchant has another healthy provider
+   for the same method, retry there. Record each attempt on the payment so
+   the merchant can see which provider served it.
+3. **Routing rules per merchant.**
+   - **Rule format:** evaluated in order, e.g. "QRIS → Xendit, else Midtrans";
+     "amount > 10,000,000 → DOKU"; "e-wallet `gopay` → Midtrans only".
+   - **Creating payments:** `provider` becomes optional on `POST /v1/payments`;
+     when it's omitted, the rules decide.
+4. **Success-rate routing (later).** Weight providers by recent success
+   rate per channel. Ship this only after the simple rules have produced
+   enough data to compare against.
+
+**Architecture.**
+- **Router:** a `usecase.Router` port picks an ordered list of providers. A
+  rules adapter comes first, a scoring adapter later.
+- **Payments:** `PaymentService.Create` walks the list.
+- **Health:** health state lives behind a `HealthTracker` port, in memory
+  first and in Redis for multiple instances.
+
+**Risks.**
+- **Double charges on failover:** failover must never happen once a provider
+  might have created the charge, for example on a timeout after the request
+  was sent. Treat a timeout as unknown: run a status check first, and fail
+  over only on a clear rejection.
+- **Different payment instructions:** VA numbers differ per provider, so
+  failover only makes sense before the customer sees payment instructions.
+
+## Phase 2: know where the money is
+
+**Problem.** Each gateway settles on its own schedule, in its own report
+format, with its own fees. Merchants reconcile by hand in spreadsheets: did
+every paid order actually reach the bank account, and what did it cost? A
+neutral layer above the gateways can do this; no single gateway can, because
+each sees only its own transactions.
+
+**Build.**
+
+1. **Settlement import.** A `SettlementSource` port per provider pulls
+   settlement and payout reports, through the provider's reporting API where
+   one exists, or by uploading the provider's CSV export. Store each line with
+   gross amount, fee, tax, net amount and settlement date.
+2. **Automatic matching.** Match settlement lines to payments by provider
+   reference and amount. Flag four kinds of mismatch:
+   - paid but not settled after the expected delay;
+   - settled but unknown to the hub;
+   - amount mismatch;
+   - fee different from the merchant's contract.
+3. **Reconciliation API and webhook.** `GET /v1/reconciliation?date=` returns
+   matched, pending and mismatched totals, and a daily
+   `reconciliation.completed` event lists the mismatches.
+4. **Exports.** CSV export of payments, refunds and settlements for
+   accounting tools, with consistent columns across providers.
+
+**Architecture.**
+- **Storage:** new `settlement` and `settlement_line` tables. Settlement data
+  is immutable once imported; corrections arrive as new lines.
+- **Jobs:** import and matching run as background jobs, using the same lease
+  pattern as the webhook dispatcher.
+
+## Phase 3: more ways to get paid
+
+| Feature | Problem it solves | Approach |
+|---|---|---|
+| **Payment links** | Small merchants sell over WhatsApp and Instagram and have no checkout page | `POST /v1/payment-links` returns a short URL. Opening it shows the methods the merchant enabled across all connected providers, then creates the payment through the normal flow. Optional amount, expiry and single or multiple use |
+| **Hosted checkout** | Every merchant rebuilds a "choose a payment method" page | A small server-rendered page served by the hub, themable per merchant. The same page backs payment links |
+| **Recurring payments** | Subscriptions need saved payment methods, and each gateway tokenizes differently | Unified `payment_method` tokens wrapping gateway tokens: GoPay recurring through Midtrans or Xendit, cards through Xendit or DOKU. Merchant-initiated charges with `POST /v1/payment-methods/{id}/charges`. Plans and schedules come later. Note that GoPay requires completion in the GoPay app from January 2026 |
+| **Status pages for customers** | Customers ask the merchant "did my payment go through?" | Public, unguessable payment status URL with the payment instructions (VA number, QR code, expiry) |
+
+The hub stores only the gateway's token and a display hint (`gopay ••••1234`),
+never the underlying credential.
+
+## Phase 4: lower costs
+
+**Problem.** Fees differ by provider, method and contract, and they change. Bank
+Indonesia extended zero-percent QRIS merchant discount rates from 1 October
+2026; reports describe the thresholds as up to Rp500,000 for micro merchants
+and up to Rp100,000 for all merchants. Merchants who don't steer suitable
+payments to the cheapest option leave money on the table.
+
+**Build.**
+- **Fee tables per merchant and provider:** percentage, flat amount and
+  caps per method and channel, entered from the merchant's own contract.
+- **Fee estimate:** included on each payment, then confirmed against the
+  settlement data from Phase 2.
+- **Cost-aware routing:** a routing strategy that prefers the cheapest healthy
+  provider, plugged into the Phase 1 router.
+- **Method hints:** an optional "suggest QRIS" flag on hosted checkout for
+  amounts under the zero-MDR thresholds.
+- **Fee report:** a monthly report of what each provider and method cost,
+  and what routing saved.
+
+## Phase 5: faster integration
+
+| Item | Why |
+|---|---|
+| **OpenAPI 3 spec**, generated docs and a Postman collection | One source of truth for the API, used by every SDK |
+| **SDKs:** PHP first, then Node.js, Go and Python | PHP (Laravel) is common among Indonesian SMB stacks. Each SDK includes webhook signature verification |
+| **Plugins:** WooCommerce, then Laravel | Lets non-developers adopt the hub |
+| **Merchant dashboard** | Payments, refunds, webhook deliveries and replay, API keys, gateway credentials, routing rules, reconciliation. Built on the existing API, with no private endpoints |
+| **Test mode** | The `dev/` mock providers become a first-class sandbox, so merchants can simulate paid, expired and failed payments without vendor sandbox accounts |
+
+## Phase 6: compliance and trust
+
+| Item | Why |
+|---|---|
+| **Personal data retention and erasure** | Indonesia's Personal Data Protection law (UU PDP) has been fully in force since October 2024, and Government Regulation 33/2026 adds sanctions from 16 January 2027. Add configurable retention for customer name, email and phone; erasure on request; and a data export per customer |
+| **Encrypt customer personal data at rest** | Credentials are already encrypted; customer contact data isn't yet |
+| **Audit log** | Who changed credentials, rotated keys, replayed webhooks or edited routing rules, and when. Required by most enterprise merchants |
+| **Key management** | Move `ENCRYPTION_KEY` to a KMS (AWS KMS, GCP KMS or Vault) with key rotation |
+| **SNAP readiness** | Bank Indonesia's open API payment standard (SNAP) governs VA, direct debit and e-wallet APIs. Gateways such as DOKU publish SNAP migration guides. Adapters should target each gateway's SNAP endpoints as they become the default, without changing the hub's own API |
+| **Admin roles** | Replace the single admin token with named admin users and scoped permissions |
+
+## More gateways
+
+Add adapters when merchants ask for them, following
+[ADDING_A_GATEWAY.md](ADDING_A_GATEWAY.md). Candidates often used by Indonesian
+small businesses include iPaymu, Duitku, Tripay and Faspay. Check current
+market share and API quality before committing; this list isn't researched
+in depth.
+
+## Not planned
+
+- Holding, splitting or paying out funds (needs a payment service licence).
+- Storing raw card numbers (PCI DSS scope).
+- Fraud scoring. The gateways already do this, and the hub sees too little
+  data to do it better. Revisit once routing data exists.
+
+## Sources
+
+- [Bank Indonesia: zero-percent QRIS MDR expansion, August 2026](https://www.bi.go.id/en/publikasi/ruang-media/news-release/Pages/sp_2815926.aspx)
+- [BCA: QRIS MDR adjustment notice, September 2026](https://www.bca.co.id/en/informasi/news-and-features/2026/09/01/18/50/informasi-penyesuaian-merchant-discount-rate-mdr-transaksi-qris)
+- [Kontan: QRIS 0% MDR thresholds](https://keuangan.kontan.co.id/news/kebijakan-mdr-qris-0-diperluas-bank-hadapi-tekanan-fee-dari-bisnis-acquiring)
+- [Xendit status: QR payments disruption, Indonesia](https://status.xendit.co/incidents/2y7stm938cr9)
+- [e27: reconciliation across payment rails](https://e27.co/same-failure-better-clothes-matchmade-io-on-selling-indonesian-finance-tech-in-singapore-20260925/)
+- [Bank Indonesia: SNAP](https://www.bi.go.id/en/layanan/Standar/SNAP/default.aspx)
+- [DOKU: SNAP migration guide](https://docs.doku.com/miscellaneous/snap-migration)
+- [Xendit docs: GoPay and GoPay recurring](https://docs.xendit.co/docs/gopay)
+- [Juspay: payment orchestration in 2026](https://juspay.io/blog/why-global-merchants-can-t-afford-to-ignore-payment-orchestration-in-2026)
+- [Hyperswitch (open-source orchestration, for comparison)](https://github.com/juspay/hyperswitch)
+- [Rajah & Tann: Indonesia PDP law updates](https://www.rajahtannasia.com/viewpoints/indonesias-pdp-law-updates-dpa-u-s-trade‑related-data-transfers-and-recent-court-rulings/)
+- [RSM: PP 33/2026 implementation priorities](https://www.rsm.global/indonesia/sites/default/files/media/publications/Client%20Alert/2026/RSM%20Indonesia%20Client%20Alert%20%20-%20PP%20332026%20Six%20Implementation%20Priorities%20before%2016%20January%202027.pdf)
