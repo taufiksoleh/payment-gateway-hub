@@ -176,17 +176,6 @@ func (r *MerchantRepo) FindByID(_ context.Context, id string) (*domain.Merchant,
 	return &m, nil
 }
 
-func (r *MerchantRepo) FindByAPIKeyHash(_ context.Context, hash string) (*domain.Merchant, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, m := range r.byID {
-		if m.APIKeyHash == hash {
-			return &m, nil
-		}
-	}
-	return nil, domain.ErrNotFound
-}
-
 // CredentialRepo stores gateway credentials in a map.
 type CredentialRepo struct {
 	mu    sync.RWMutex

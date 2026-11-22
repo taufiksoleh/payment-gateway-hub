@@ -184,6 +184,21 @@ id), rather than `OFFSET`:
   rows to know whether another page exists, so `next_cursor` is never set on
   the last page.
 
+**API keys live in their own table, so rotation needs no downtime.** A
+merchant can hold several keys. `Rotate` issues a new key and gives every
+other usable key an expiry, keeping any earlier expiry a key already had.
+Clients switch over during the grace period.
+
+- **Stored form:** keys are sha256 hashes (256-bit random keys don't need a
+  slow hash) plus the last 4 characters as a hint.
+- **Serialized per merchant:** `Rotate` and `Revoke` lock the merchant row
+  (`SELECT ... FOR UPDATE`). Two concurrent revokes therefore can't both
+  pass the "not your last usable key" check. The contract test fires exactly
+  that race.
+- **Usage tracking:** authentication records `last_used_at` at most once a
+  minute per key, so merchants can tell whether an old key is still in use
+  before it expires.
+
 **Rate limiting is a token bucket per key, in front of the work it protects.**
 `platform/ratelimit` holds a small, dependency-free token bucket behind a
 `Limiter` interface. `httpapi` stacks it per route:

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func TestRepositories(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	suffix := now.Format("150405.000000")
 
-	m, _ := domain.NewMerchant("mch_test_"+suffix, "Toko", "hash_"+suffix, "", "whsec", now)
+	m, _ := domain.NewMerchant("mch_test_"+suffix, "Toko", "", "whsec", now)
 	if err := merchants.Create(ctx, m); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestRepositories(t *testing.T) {
 	t.Run("idempotency store contract", func(t *testing.T) {
 		idempotencytest.RunStoreContract(t, postgres.NewIdempotencyStore(db), m.ID)
 	})
-	if got, err := merchants.FindByAPIKeyHash(ctx, m.APIKeyHash); err != nil || got.ID != m.ID {
+	if got, err := merchants.FindByID(ctx, m.ID); err != nil || got.Name != "Toko" {
 		t.Fatalf("find merchant: %v", err)
 	}
 
@@ -151,7 +152,7 @@ func TestRepositories(t *testing.T) {
 		// Two fresh merchants with one payment each and no webhooks yet.
 		account := func(name string) outboxtest.Account {
 			t.Helper()
-			mm, _ := domain.NewMerchant("mch_"+name+"_"+suffix, name, "hash_"+name+"_"+suffix, "", "whsec", now)
+			mm, _ := domain.NewMerchant("mch_"+name+"_"+suffix, name, "", "whsec", now)
 			if err := merchants.Create(ctx, mm); err != nil {
 				t.Fatal(err)
 			}
@@ -170,12 +171,20 @@ func TestRepositories(t *testing.T) {
 	t.Run("payment list contract", func(t *testing.T) {
 		fresh := func(name string) string {
 			t.Helper()
-			mm, _ := domain.NewMerchant("mch_list_"+name+"_"+suffix, name, "hash_list_"+name+"_"+suffix, "", "whsec", now)
+			mm, _ := domain.NewMerchant("mch_list_"+name+"_"+suffix, name, "", "whsec", now)
 			if err := merchants.Create(ctx, mm); err != nil {
 				t.Fatal(err)
 			}
 			return mm.ID
 		}
 		storagetest.RunPaymentListContract(t, payments, fresh("a"), fresh("b"), "pay_list_"+suffix+"_")
+	})
+
+	t.Run("api key contract", func(t *testing.T) {
+		mm, _ := domain.NewMerchant("mch_keys_"+suffix, "Keys", "", "whsec", now)
+		if err := merchants.Create(ctx, mm); err != nil {
+			t.Fatal(err)
+		}
+		storagetest.RunAPIKeyContract(t, postgres.NewAPIKeyRepo(db), mm.ID, strings.ReplaceAll(suffix, ".", ""))
 	})
 }

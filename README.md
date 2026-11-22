@@ -28,6 +28,7 @@ merchant's own vendor account.
 - Double-refund protection: the refund amount is reserved before the vendor is called
 - `Idempotency-Key` header on payment and refund creation, so client retries never charge or refund twice
 - Rate limiting per merchant, per client IP and on admin endpoints, with standard `RateLimit-*` headers
+- API key rotation without downtime: old keys keep working through a grace period
 - Plain Go: standard library router, `database/sql`, `log/slog`. One external dependency (pgx)
 
 ## Supported channels
@@ -101,6 +102,10 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 | GET | `/healthz` | — | Liveness |
 | GET | `/v1/providers` | — | Registered providers |
 | POST | `/v1/merchants` | admin token | Register a merchant |
+| POST | `/v1/merchants/{id}/api-keys` | admin token | Issue a key for a merchant (`revoke_existing` for a leaked key) |
+| GET | `/v1/api-keys` | API key | Your API keys and their status |
+| POST | `/v1/api-keys/rotate` | API key | New key, old keys expire after a grace period |
+| DELETE | `/v1/api-keys/{id}` | API key | Revoke a key immediately |
 | GET | `/v1/gateways` | API key | List connected vendors |
 | PUT | `/v1/gateways/{provider}` | API key | Add or replace vendor credentials |
 | DELETE | `/v1/gateways/{provider}` | API key | Remove vendor credentials |
@@ -205,6 +210,28 @@ curl -s -X POST localhost:8080/v1/webhooks/replay        -H "Authorization: Bear
 - **Filters:** `status` is `pending`, `delivered` or `dead`. Leave it out to list everything. `limit` is 1–200 and defaults to 50.
 - **What replay does:** it queues the webhook again within about a second, with a fresh 12 attempts and the **same** event `id` and payload.
 - **Only dead webhooks can be replayed.** Anything else gets `409 invalid_state`. A delivered event would carry an id you have already processed.
+
+### Rotating API keys
+
+```bash
+# 1. Get a new key. Every other key keeps working for the grace period (default 24h).
+curl -s -X POST localhost:8080/v1/api-keys/rotate -H "Authorization: Bearer $OLD_KEY" \
+  -d '{"grace_period_seconds": 86400}'
+#   → {"api_key":"pgh_...", "key":{...}, "previous_keys_expire_at":"..."}   ← shown once
+
+# 2. Deploy the new key everywhere. Check nothing still uses the old one:
+curl -s localhost:8080/v1/api-keys -H "Authorization: Bearer $NEW_KEY"
+#   → {"api_keys":[{"id":"key_...","hint":"pgh_…a1b2","status":"expiring",
+#                    "expires_at":"...","last_used_at":"...","current":false}, ...]}
+
+# 3. Optionally cut the old key off before the grace period ends.
+curl -s -X DELETE localhost:8080/v1/api-keys/key_... -H "Authorization: Bearer $NEW_KEY"
+```
+
+- **Grace period:** `grace_period_seconds` is 0 to 604800 (7 days). `0` stops the old keys immediately, including the key that sent the rotate request.
+- **Statuses:** `active`, `expiring` (in its grace period), `expired` and `revoked`. `last_used_at` updates at most once a minute.
+- **No lockout:** you can't revoke your last usable key (`409 conflict`). Rotate first.
+- **Lost or leaked key:** an admin can issue a new key with `POST /v1/merchants/{id}/api-keys`. Send `{"revoke_existing": true}` to cut off every other key at once.
 
 ### Rate limits
 

@@ -27,6 +27,7 @@ type ctxKey int
 const (
 	ctxRequestID ctxKey = iota
 	ctxMerchant
+	ctxAPIKeyID
 )
 
 // requestID reuses an incoming X-Request-Id or generates one.
@@ -87,12 +88,14 @@ func recoverer(log *slog.Logger) middleware {
 func requireMerchant(merchants MerchantUsecase) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			m, err := merchants.Authenticate(r.Context(), bearerToken(r))
+			p, err := merchants.Authenticate(r.Context(), bearerToken(r))
 			if err != nil {
 				writeError(w, err)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxMerchant, m)))
+			ctx := context.WithValue(r.Context(), ctxMerchant, p.Merchant)
+			ctx = context.WithValue(ctx, ctxAPIKeyID, p.KeyID)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -125,4 +128,10 @@ func bearerToken(r *http.Request) string {
 // requireMerchant.
 func merchantFrom(ctx context.Context) *domain.Merchant {
 	return ctx.Value(ctxMerchant).(*domain.Merchant)
+}
+
+// apiKeyIDFrom returns the id of the key that authenticated the request.
+func apiKeyIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(ctxAPIKeyID).(string)
+	return id
 }

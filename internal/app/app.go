@@ -65,7 +65,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	a.dispatcher = notify.NewDispatcher(repos.outbox, repos.merchants, notify.NewSender(nil), log)
 
 	// 4. Use cases.
-	merchants := usecase.NewMerchantService(repos.merchants, repos.creds, gateways)
+	merchants := usecase.NewMerchantService(repos.merchants, repos.apiKeys, repos.creds, gateways)
 	payments := usecase.NewPaymentService(usecase.PaymentServiceDeps{
 		Payments: repos.payments,
 		Creds:    repos.creds,
@@ -99,6 +99,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 type repositories struct {
 	payments    usecase.PaymentRepository
 	merchants   usecase.MerchantRepository
+	apiKeys     usecase.APIKeyRepository
 	creds       usecase.CredentialRepository
 	idempotency idempotency.Store
 	outbox      outbox.Store
@@ -112,6 +113,7 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 		return &repositories{
 			payments:    memory.NewPaymentRepo(ob),
 			merchants:   memory.NewMerchantRepo(),
+			apiKeys:     memory.NewAPIKeyRepo(),
 			creds:       memory.NewCredentialRepo(),
 			idempotency: memory.NewIdempotencyStore(),
 			outbox:      ob,
@@ -136,6 +138,7 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 	return &repositories{
 		payments:    postgres.NewPaymentRepo(db, notify.EncodeEvent),
 		merchants:   postgres.NewMerchantRepo(db),
+		apiKeys:     postgres.NewAPIKeyRepo(db),
 		creds:       postgres.NewCredentialRepo(db, cipher),
 		idempotency: postgres.NewIdempotencyStore(db),
 		outbox:      outboxStore,

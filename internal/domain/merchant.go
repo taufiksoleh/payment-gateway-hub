@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-// Merchant is a hub customer. A merchant authenticates with an API key and
-// brings its own accounts at each payment gateway (see GatewayCredential).
+// Merchant is a hub customer. A merchant authenticates with API keys (see
+// APIKey) and brings its own accounts at each payment gateway (see
+// GatewayCredential).
 type Merchant struct {
 	ID            string
 	Name          string
-	APIKeyHash    string // never store the raw API key
 	WebhookURL    string // where the hub sends payment status updates
 	WebhookSecret string // used to sign outbound webhooks
 	CreatedAt     time.Time
@@ -19,7 +19,7 @@ type Merchant struct {
 }
 
 // NewMerchant validates input and builds a Merchant.
-func NewMerchant(id, name, apiKeyHash, webhookURL, webhookSecret string, now time.Time) (*Merchant, error) {
+func NewMerchant(id, name, webhookURL, webhookSecret string, now time.Time) (*Merchant, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, Invalid("name", "is required")
@@ -33,7 +33,6 @@ func NewMerchant(id, name, apiKeyHash, webhookURL, webhookSecret string, now tim
 	return &Merchant{
 		ID:            id,
 		Name:          name,
-		APIKeyHash:    apiKeyHash,
 		WebhookURL:    webhookURL,
 		WebhookSecret: webhookSecret,
 		CreatedAt:     now,

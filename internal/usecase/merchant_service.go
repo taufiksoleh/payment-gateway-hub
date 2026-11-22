@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -13,17 +12,24 @@ import (
 )
 
 // MerchantService registers merchants, authenticates them and manages their
-// gateway credentials.
+// gateway credentials. API key management lives in apikey_service.go.
 type MerchantService struct {
 	merchants MerchantRepository
+	keys      APIKeyRepository
 	creds     CredentialRepository
 	gateways  GatewayResolver
 	now       func() time.Time
 }
 
 // NewMerchantService wires a MerchantService.
-func NewMerchantService(merchants MerchantRepository, creds CredentialRepository, gateways GatewayResolver) *MerchantService {
-	return &MerchantService{merchants: merchants, creds: creds, gateways: gateways, now: time.Now}
+func NewMerchantService(merchants MerchantRepository, keys APIKeyRepository, creds CredentialRepository, gateways GatewayResolver) *MerchantService {
+	return &MerchantService{merchants: merchants, keys: keys, creds: creds, gateways: gateways, now: time.Now}
+}
+
+// WithClock replaces the clock, for tests.
+func (s *MerchantService) WithClock(now func() time.Time) *MerchantService {
+	s.now = now
+	return s
 }
 
 // RegisterMerchantInput is the data needed to onboard a merchant.
@@ -38,29 +44,21 @@ type RegisteredMerchant struct {
 	APIKey   string
 }
 
-// Register creates a merchant with a fresh API key and webhook secret.
+// Register creates a merchant with a webhook secret and its first API key.
 func (s *MerchantService) Register(ctx context.Context, in RegisterMerchantInput) (*RegisteredMerchant, error) {
-	apiKey := id.Secret("pgh")
-	m, err := domain.NewMerchant(id.New("mch"), in.Name, HashAPIKey(apiKey), in.WebhookURL, id.Secret("whsec"), s.now())
+	now := s.now()
+	m, err := domain.NewMerchant(id.New("mch"), in.Name, in.WebhookURL, id.Secret("whsec"), now)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.merchants.Create(ctx, m); err != nil {
 		return nil, fmt.Errorf("save merchant: %w", err)
 	}
-	return &RegisteredMerchant{Merchant: m, APIKey: apiKey}, nil
-}
-
-// Authenticate resolves an API key to its merchant.
-func (s *MerchantService) Authenticate(ctx context.Context, apiKey string) (*domain.Merchant, error) {
-	if apiKey == "" {
-		return nil, domain.ErrUnauthorized
+	raw, key := newAPIKey(m.ID, now)
+	if err := s.keys.Create(ctx, key); err != nil {
+		return nil, fmt.Errorf("save api key: %w", err)
 	}
-	m, err := s.merchants.FindByAPIKeyHash(ctx, HashAPIKey(apiKey))
-	if errors.Is(err, domain.ErrNotFound) {
-		return nil, domain.ErrUnauthorized
-	}
-	return m, err
+	return &RegisteredMerchant{Merchant: m, APIKey: raw}, nil
 }
 
 // SaveCredentialInput is a merchant's account at one provider.

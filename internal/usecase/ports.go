@@ -7,6 +7,7 @@ package usecase
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
@@ -45,7 +46,36 @@ type PaymentFilter struct {
 type MerchantRepository interface {
 	Create(ctx context.Context, m *domain.Merchant) error
 	FindByID(ctx context.Context, id string) (*domain.Merchant, error)
-	FindByAPIKeyHash(ctx context.Context, hash string) (*domain.Merchant, error)
+}
+
+// ErrLastAPIKey is returned when revoking a merchant's last usable key,
+// which would lock the merchant out. It matches domain.ErrConflict.
+var ErrLastAPIKey = fmt.Errorf("%w: cannot revoke the last usable API key, rotate first", domain.ErrConflict)
+
+// APIKeyRepository persists merchants' API keys. Rotate and Revoke are
+// single operations serialized per merchant, so concurrent calls cannot leave
+// a merchant without a usable key or with an unexpected set of keys.
+type APIKeyRepository interface {
+	Create(ctx context.Context, k *domain.APIKey) error
+	FindByHash(ctx context.Context, hash string) (*domain.APIKey, error)
+	List(ctx context.Context, merchantID string) ([]domain.APIKey, error)
+
+	// Rotate stores newKey and makes every other usable key of the merchant
+	// expire at othersExpireAt (a key already expiring sooner keeps its
+	// earlier expiry).
+	Rotate(ctx context.Context, newKey *domain.APIKey, othersExpireAt time.Time) error
+
+	// Revoke revokes one key at `at`. It returns domain.ErrNotFound if the
+	// key is not the merchant's, and domain.ErrConflict if it is the
+	// merchant's last usable key.
+	Revoke(ctx context.Context, merchantID, keyID string, at time.Time) error
+
+	// RevokeAllExcept revokes every usable key of the merchant except keepID
+	// and returns how many (used when a key leaked).
+	RevokeAllExcept(ctx context.Context, merchantID, keepID string, at time.Time) (int, error)
+
+	// TouchLastUsed records that the key authenticated a request at `at`.
+	TouchLastUsed(ctx context.Context, keyID string, at time.Time) error
 }
 
 // CredentialRepository persists merchants' gateway credentials. Encryption at

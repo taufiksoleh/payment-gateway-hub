@@ -52,7 +52,7 @@ func newTestServer(t *testing.T, opts ...func(*httpapi.Deps)) *testServer {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	deps := httpapi.Deps{
-		Merchants: usecase.NewMerchantService(merchantRepo, credRepo, registry),
+		Merchants: usecase.NewMerchantService(merchantRepo, memory.NewAPIKeyRepo(), credRepo, registry),
 		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
 			Payments: memory.NewPaymentRepo(ob),
 			Creds:    credRepo,

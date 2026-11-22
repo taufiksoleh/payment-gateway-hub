@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
@@ -28,7 +29,11 @@ type PaymentUsecase interface {
 // MerchantUsecase is what the handlers need from usecase.MerchantService.
 type MerchantUsecase interface {
 	Register(ctx context.Context, in usecase.RegisterMerchantInput) (*usecase.RegisteredMerchant, error)
-	Authenticate(ctx context.Context, apiKey string) (*domain.Merchant, error)
+	Authenticate(ctx context.Context, apiKey string) (*usecase.Principal, error)
+	RotateAPIKey(ctx context.Context, merchantID string, grace time.Duration) (*usecase.IssuedAPIKey, error)
+	ListAPIKeys(ctx context.Context, merchantID string) ([]domain.APIKey, error)
+	RevokeAPIKey(ctx context.Context, merchantID, keyID string) error
+	IssueAPIKey(ctx context.Context, merchantID string, revokeExisting bool) (*usecase.IssuedAPIKey, int, error)
 	SaveCredential(ctx context.Context, merchantID string, in usecase.SaveCredentialInput) (*domain.GatewayCredential, error)
 	ListCredentials(ctx context.Context, merchantID string) ([]domain.GatewayCredential, error)
 	DeleteCredential(ctx context.Context, merchantID string, p domain.Provider) error
@@ -78,6 +83,12 @@ func NewRouter(d Deps) http.Handler {
 
 	// Admin
 	mux.Handle("POST /v1/merchants", admin(h.registerMerchant))
+	mux.Handle("POST /v1/merchants/{id}/api-keys", admin(h.issueAPIKey))
+
+	// Merchant: API keys
+	mux.Handle("GET /v1/api-keys", merchant(h.listAPIKeys))
+	mux.Handle("POST /v1/api-keys/rotate", merchant(h.rotateAPIKey))
+	mux.Handle("DELETE /v1/api-keys/{id}", merchant(h.revokeAPIKey))
 
 	// Merchant: gateway credentials
 	mux.Handle("GET /v1/gateways", merchant(h.listGateways))
