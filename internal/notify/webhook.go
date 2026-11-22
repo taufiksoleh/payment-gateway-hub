@@ -1,8 +1,4 @@
-// Package notify delivers payment events to merchants' webhook URLs.
-//
-// Events reach this package through the transactional outbox
-// (internal/outbox): the Dispatcher claims due messages, signs them and POSTs
-// them, retrying with backoff.
+// Package notify delivers outbox messages to merchants' webhook URLs.
 package notify
 
 import (
@@ -26,8 +22,7 @@ import (
 // SignatureHeader carries "t=<unix seconds>,v1=<hex hmac>".
 const SignatureHeader = "X-Hub-Signature"
 
-// EncodeEvent is the outbox.Encoder for merchant webhooks: it renders the
-// public event JSON (dto.Event) for a payment event.
+// EncodeEvent renders the webhook body (dto.Event) for a payment event.
 func EncodeEvent(eventID string, e domain.PaymentEvent) ([]byte, error) {
 	return json.Marshal(dto.Event{
 		ID:        eventID,
@@ -39,12 +34,11 @@ func EncodeEvent(eventID string, e domain.PaymentEvent) ([]byte, error) {
 
 var _ outbox.Encoder = EncodeEvent
 
-// Sender POSTs signed payloads to merchants.
 type Sender struct {
 	client *http.Client
 }
 
-// NewSender builds a Sender. A nil client gets a 10s timeout.
+// NewSender uses a client with a 10s timeout when client is nil.
 func NewSender(client *http.Client) *Sender {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
@@ -52,7 +46,7 @@ func NewSender(client *http.Client) *Sender {
 	return &Sender{client: client}
 }
 
-// Send delivers one payload. Any non-2xx answer is an error.
+// Send treats any non-2xx answer as a failure.
 func (s *Sender) Send(ctx context.Context, url, secret string, payload []byte, at time.Time) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -74,9 +68,8 @@ func (s *Sender) Send(ctx context.Context, url, secret string, payload []byte, a
 	return nil
 }
 
-// Sign builds the X-Hub-Signature value. Merchants verify it by computing
-// HMAC-SHA256(secret, "<t>.<raw body>") and comparing it with v1. Including
-// the timestamp lets them reject replayed requests.
+// Sign builds X-Hub-Signature as "t=<unix>,v1=<hex HMAC-SHA256 of t.body>".
+// The timestamp lets merchants reject replays.
 func Sign(secret string, at time.Time, body []byte) string {
 	ts := strconv.FormatInt(at.Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(secret))

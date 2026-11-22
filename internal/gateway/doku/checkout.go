@@ -7,8 +7,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 )
 
-// Request and response shapes for DOKU Checkout. Only the fields the hub
-// uses are declared.
+// Wire types for DOKU Checkout, limited to the fields the hub uses.
 
 type checkoutRequest struct {
 	Order    order     `json:"order"`
@@ -51,7 +50,6 @@ type statusResponse struct {
 	} `json:"transaction"`
 }
 
-// methodTypes maps hub (method, channel) to DOKU payment_method_types.
 var methodTypes = map[domain.Method]map[domain.Channel]string{
 	domain.MethodVirtualAccount: {
 		domain.ChannelBCA:     "VIRTUAL_ACCOUNT_BCA",

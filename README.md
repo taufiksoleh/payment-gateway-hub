@@ -60,7 +60,7 @@ make db-up
 make run
 ```
 
-Leave `DATABASE_URL` empty to run with in-memory storage instead (no Docker needed).
+Leave `DATABASE_URL` empty to run with in-memory storage instead (no Docker needed). Every setting is listed in `.env.example`.
 
 ### Try it
 
@@ -306,4 +306,5 @@ This is a solid foundation, not yet production-certified. Before going live:
 - **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
 - **Rate limits are per instance.** Buckets live in memory, so N hub instances allow up to N times each limit. Implement `ratelimit.Limiter` on a shared store (such as Redis) if you need exact global limits.
-- **Not yet built:** API key rotation, metrics.
+- **`failure_reason`** is part of the API but not yet filled from provider responses.
+- **Not yet built:** metrics.

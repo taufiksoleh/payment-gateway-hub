@@ -14,7 +14,7 @@ import (
 
 type middleware func(http.Handler) http.Handler
 
-// chain applies middlewares so the last one listed runs first.
+// chain wraps h so the last middleware listed runs first.
 func chain(h http.Handler, mws ...middleware) http.Handler {
 	for _, mw := range mws {
 		h = mw(h)
@@ -76,7 +76,7 @@ func recoverer(log *slog.Logger) middleware {
 			defer func() {
 				if v := recover(); v != nil {
 					log.ErrorContext(r.Context(), "panic", "value", v, "path", r.URL.Path)
-					writeJSON(w, http.StatusInternalServerError, errorBody{Error: errorDetail{Code: "internal_error", Message: "internal server error"}})
+					writeProblem(w, http.StatusInternalServerError, "internal_error", "", "internal server error")
 				}
 			}()
 			next.ServeHTTP(w, r)
@@ -100,8 +100,7 @@ func requireMerchant(merchants MerchantUsecase) middleware {
 	}
 }
 
-// requireAdmin checks the static admin token. An empty configured token
-// disables admin endpoints entirely.
+// requireAdmin checks the admin token; an empty token disables admin routes.
 func requireAdmin(token string) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,13 +123,11 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-// merchantFrom returns the authenticated merchant. Only call it behind
-// requireMerchant.
+// merchantFrom must only be called behind requireMerchant.
 func merchantFrom(ctx context.Context) *domain.Merchant {
 	return ctx.Value(ctxMerchant).(*domain.Merchant)
 }
 
-// apiKeyIDFrom returns the id of the key that authenticated the request.
 func apiKeyIDFrom(ctx context.Context) string {
 	id, _ := ctx.Value(ctxAPIKeyID).(string)
 	return id

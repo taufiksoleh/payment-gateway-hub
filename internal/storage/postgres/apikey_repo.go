@@ -9,7 +9,6 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
-// APIKeyRepo implements usecase.APIKeyRepository.
 type APIKeyRepo struct {
 	db *sql.DB
 }
@@ -23,7 +22,7 @@ var _ usecase.APIKeyRepository = (*APIKeyRepo)(nil)
 //nolint:gosec // G101 false positive: a list of column names, not a credential.
 const apiKeyColumns = `id, merchant_id, key_hash, hint, created_at, expires_at, revoked_at, last_used_at`
 
-// usableAt is the SQL form of domain.APIKey.Usable, with the time as $2.
+// usableAt is domain.APIKey.Usable in SQL, with the time as $2.
 const usableAt = `revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)`
 
 func (r *APIKeyRepo) Create(ctx context.Context, k *domain.APIKey) error {
@@ -41,21 +40,11 @@ func (r *APIKeyRepo) List(ctx context.Context, merchantID string) ([]domain.APIK
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []domain.APIKey
-	for rows.Next() {
-		k, err := scanAPIKey(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *k)
-	}
-	return out, rows.Err()
+	return collect(rows, scanAPIKey)
 }
 
-// Rotate runs under a lock on the merchant row, so concurrent rotations for
-// the same merchant happen one after the other: the later one sees, and
-// schedules expiry for, the key the earlier one created.
+// Rotate holds the merchant row lock, so concurrent rotations run one after
+// the other and each sees the key the previous one created.
 func (r *APIKeyRepo) Rotate(ctx context.Context, newKey *domain.APIKey, othersExpireAt time.Time) error {
 	return inTx(ctx, r.db, func(tx *sql.Tx) error {
 		if err := lockMerchant(ctx, tx, newKey.MerchantID); err != nil {
@@ -70,9 +59,8 @@ func (r *APIKeyRepo) Rotate(ctx context.Context, newKey *domain.APIKey, othersEx
 	})
 }
 
-// Revoke refuses to revoke the last usable key. The count and the update run
-// under the merchant lock, so two concurrent revokes cannot both pass the
-// check and leave zero keys.
+// Revoke counts and updates under the merchant row lock, so concurrent
+// revokes cannot both pass the last-key check.
 func (r *APIKeyRepo) Revoke(ctx context.Context, merchantID, keyID string, at time.Time) error {
 	return inTx(ctx, r.db, func(tx *sql.Tx) error {
 		if err := lockMerchant(ctx, tx, merchantID); err != nil {
@@ -84,7 +72,7 @@ func (r *APIKeyRepo) Revoke(ctx context.Context, merchantID, keyID string, at ti
 			return err
 		}
 		if k.RevokedAt != nil {
-			return nil // already revoked
+			return nil
 		}
 		if k.Usable(at) {
 			var usable int
@@ -123,7 +111,7 @@ func (r *APIKeyRepo) TouchLastUsed(ctx context.Context, keyID string, at time.Ti
 	return err
 }
 
-// lockMerchant takes a row lock that serializes key changes per merchant.
+// lockMerchant serializes key changes for one merchant.
 func lockMerchant(ctx context.Context, tx *sql.Tx, merchantID string) error {
 	var id string
 	return mapError(tx.QueryRowContext(ctx,
@@ -149,12 +137,4 @@ func scanAPIKey(s scanner) (*domain.APIKey, error) {
 	k.RevokedAt = timePtr(revoked)
 	k.LastUsedAt = timePtr(lastUse)
 	return &k, nil
-}
-
-func timePtr(t sql.NullTime) *time.Time {
-	if !t.Valid {
-		return nil
-	}
-	v := t.Time
-	return &v
 }

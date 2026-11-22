@@ -10,7 +10,6 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
 )
 
-// IdempotencyStore implements idempotency.Store.
 type IdempotencyStore struct {
 	db *sql.DB
 }
@@ -21,13 +20,11 @@ func NewIdempotencyStore(db *sql.DB) *IdempotencyStore {
 
 var _ idempotency.Store = (*IdempotencyStore)(nil)
 
-// Claim inserts the record, or takes over an abandoned/expired one, in a
-// single statement. ON CONFLICT ... DO UPDATE locks the existing row, so two
-// concurrent claims cannot both win. When nothing was written the key is
-// held by a live record, which is returned.
+// Claim inserts the record or takes over an abandoned or expired one in a
+// single statement; ON CONFLICT DO UPDATE locks the row, so only one of two
+// concurrent claims wins. If nothing was written, the live record is
+// returned. The loop covers a row purged between the INSERT and the SELECT.
 func (s *IdempotencyStore) Claim(ctx context.Context, rec idempotency.Record, reclaim idempotency.Reclaim) (*idempotency.Record, error) {
-	// Two attempts: the existing row may be purged between the INSERT and
-	// the SELECT, in which case the second INSERT succeeds.
 	for attempt := 0; attempt < 2; attempt++ {
 		res, err := s.db.ExecContext(ctx, `
 			INSERT INTO idempotency_keys (merchant_id, key, request_hash, token, status_code, response_body, created_at)
@@ -47,7 +44,7 @@ func (s *IdempotencyStore) Claim(ctx context.Context, rec idempotency.Record, re
 			return nil, err
 		}
 		if n, _ := res.RowsAffected(); n == 1 {
-			return nil, nil // claimed
+			return nil, nil
 		}
 
 		existing, err := s.find(ctx, rec.MerchantID, rec.Key)

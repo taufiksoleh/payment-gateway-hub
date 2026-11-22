@@ -1,4 +1,4 @@
-// Package secret encrypts small values (gateway credentials) at rest.
+// Package secret encrypts gateway credentials at rest.
 package secret
 
 import (
@@ -10,12 +10,11 @@ import (
 	"fmt"
 )
 
-// Cipher is AES-256-GCM. Output layout: nonce || ciphertext+tag.
+// Cipher is AES-256-GCM; ciphertexts are nonce || sealed data.
 type Cipher struct {
 	aead cipher.AEAD
 }
 
-// NewCipher builds a Cipher from a 32-byte key.
 func NewCipher(key []byte) (*Cipher, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("secret: key must be 32 bytes, got %d", len(key))
@@ -31,8 +30,7 @@ func NewCipher(key []byte) (*Cipher, error) {
 	return &Cipher{aead: aead}, nil
 }
 
-// NewCipherFromBase64 decodes a standard base64 key (as stored in env vars).
-// Generate one with: openssl rand -base64 32
+// NewCipherFromBase64 takes a key from `openssl rand -base64 32`.
 func NewCipherFromBase64(encoded string) (*Cipher, error) {
 	key, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -41,7 +39,6 @@ func NewCipherFromBase64(encoded string) (*Cipher, error) {
 	return NewCipher(key)
 }
 
-// Encrypt seals plaintext with a fresh random nonce.
 func (c *Cipher) Encrypt(plaintext []byte) ([]byte, error) {
 	nonce := make([]byte, c.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
@@ -50,7 +47,6 @@ func (c *Cipher) Encrypt(plaintext []byte) ([]byte, error) {
 	return c.aead.Seal(nonce, nonce, plaintext, nil), nil
 }
 
-// Decrypt opens data produced by Encrypt.
 func (c *Cipher) Decrypt(data []byte) ([]byte, error) {
 	n := c.aead.NonceSize()
 	if len(data) < n {

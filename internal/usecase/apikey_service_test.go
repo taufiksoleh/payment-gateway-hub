@@ -23,8 +23,13 @@ func newKeyFixture(t *testing.T) *keyFixture {
 	t.Helper()
 	clock := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
 	f := &keyFixture{clock: &clock}
-	f.svc = usecase.NewMerchantService(memory.NewMerchantRepo(), memory.NewAPIKeyRepo(), memory.NewCredentialRepo(), gateway.NewRegistry()).
-		WithClock(func() time.Time { return *f.clock })
+	f.svc = usecase.NewMerchantService(usecase.MerchantServiceDeps{
+		Merchants: memory.NewMerchantRepo(),
+		Keys:      memory.NewAPIKeyRepo(),
+		Creds:     memory.NewCredentialRepo(),
+		Gateways:  gateway.NewRegistry(),
+		Now:       func() time.Time { return *f.clock },
+	})
 
 	reg, err := f.svc.Register(context.Background(), usecase.RegisterMerchantInput{Name: "Toko"})
 	if err != nil {

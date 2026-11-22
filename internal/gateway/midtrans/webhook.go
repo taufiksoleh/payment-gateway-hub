@@ -23,9 +23,8 @@ type notification struct {
 	SettlementTime    string `json:"settlement_time"`
 }
 
-// ParseWebhook verifies a Midtrans HTTP notification.
-//
-// signature_key = SHA512(order_id + status_code + gross_amount + server_key)
+// ParseWebhook verifies signature_key =
+// SHA512(order_id + status_code + gross_amount + server_key).
 func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential, req gateway.WebhookRequest) (*gateway.WebhookEvent, error) {
 	var n notification
 	if err := json.Unmarshal(req.Body, &n); err != nil {
@@ -41,12 +40,11 @@ func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential,
 		PaymentID:   n.OrderID,
 		ProviderRef: n.TransactionID,
 		Status:      mapStatus(n.TransactionStatus, n.FraudStatus),
-		PaidAt:      parseTimePtr(n.SettlementTime),
+		PaidAt:      parseTime(n.SettlementTime),
 	}, nil
 }
 
-// Signature computes a Midtrans notification signature. Exported for tests
-// and local tooling that simulate Midtrans.
+// Signature is exported so tests and tools can simulate Midtrans.
 func Signature(orderID, statusCode, grossAmount, serverKey string) string {
 	sum := sha512.Sum512([]byte(orderID + statusCode + grossAmount + serverKey))
 	return hex.EncodeToString(sum[:])

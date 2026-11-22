@@ -5,17 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strconv"
-	"strings"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
-// PaymentRepo implements usecase.PaymentRepository. Events recorded on a
-// payment are inserted into webhook_outbox in the same transaction as the
-// payment row (transactional outbox).
+// PaymentRepo writes a payment's recorded events to webhook_outbox in the
+// same transaction as the payment row.
 type PaymentRepo struct {
 	db     *sql.DB
 	encode outbox.Encoder
@@ -25,8 +22,7 @@ func NewPaymentRepo(db *sql.DB, encode outbox.Encoder) *PaymentRepo {
 	return &PaymentRepo{db: db, encode: encode}
 }
 
-// actionJSON is the storage shape of domain.PaymentAction. Keeping JSON tags
-// here (not in the domain) leaves the domain free of persistence concerns.
+// actionJSON is how domain.PaymentAction is stored.
 type actionJSON struct {
 	VirtualAccountNumber string `json:"virtual_account_number,omitempty"`
 	QRString             string `json:"qr_string,omitempty"`
@@ -69,14 +65,10 @@ func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 	return nil
 }
 
-// errStale signals, inside the transaction, that the version check failed.
 var errStale = errors.New("stale version")
 
-// Update saves p only if the stored version still equals p.Version (nobody
-// saved it since p was loaded), then bumps p.Version. The version check and
-// the write happen in one statement, so two concurrent updates cannot both
-// win. Recorded events go to the outbox in the same transaction: if the
-// update loses, no event is written.
+// Update checks the version in the UPDATE statement itself, so only one of
+// two concurrent updates wins; the loser's events are rolled back with it.
 func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 	action, err := json.Marshal(actionJSON(p.Action))
 	if err != nil {
@@ -104,7 +96,6 @@ func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 		return insertOutbox(ctx, tx, msgs)
 	})
 	if errors.Is(err, errStale) {
-		// Either the row is gone or someone else bumped the version.
 		var exists bool
 		if err := r.db.QueryRowContext(ctx,
 			`SELECT EXISTS (SELECT 1 FROM payments WHERE id = $1)`, p.ID,
@@ -136,56 +127,33 @@ func (r *PaymentRepo) FindByOrderID(ctx context.Context, merchantID, orderID str
 	return scanPayment(row)
 }
 
-// List returns a page of the merchant's payments, newest first. Paging is
-// keyset-based on (created_at, id), so pages stay stable while new payments
-// arrive. Filters are appended only when set, keeping the SQL readable.
 func (r *PaymentRepo) List(ctx context.Context, merchantID string, f usecase.PaymentFilter) ([]domain.Payment, error) {
-	query := `SELECT ` + paymentColumns + ` FROM payments WHERE merchant_id = $1`
-	args := []any{merchantID}
-	where := func(clause string, value any) {
-		args = append(args, value)
-		query += " AND " + strings.ReplaceAll(clause, "?", "$"+strconv.Itoa(len(args)))
-	}
-
+	q := newQuery(`SELECT `+paymentColumns+` FROM payments WHERE merchant_id = $1`, merchantID)
 	if f.Status != "" {
-		where("status = ?", f.Status)
+		q.where("status = " + q.arg(f.Status))
 	}
 	if f.Provider != "" {
-		where("provider = ?", f.Provider)
+		q.where("provider = " + q.arg(f.Provider))
 	}
 	if f.Method != "" {
-		where("method = ?", f.Method)
+		q.where("method = " + q.arg(f.Method))
 	}
 	if f.OrderID != "" {
-		where("order_id = ?", f.OrderID)
+		q.where("order_id = " + q.arg(f.OrderID))
 	}
 	if !f.CreatedFrom.IsZero() {
-		where("created_at >= ?", f.CreatedFrom)
+		q.where("created_at >= " + q.arg(f.CreatedFrom))
 	}
 	if !f.CreatedTo.IsZero() {
-		where("created_at < ?", f.CreatedTo)
+		q.where("created_at < " + q.arg(f.CreatedTo))
 	}
-	if f.Cursor != "" {
-		where("(created_at, id) < (SELECT created_at, id FROM payments WHERE id = ? AND merchant_id = $1)", f.Cursor)
-	}
-	args = append(args, f.Limit)
-	query += " ORDER BY created_at DESC, id DESC LIMIT $" + strconv.Itoa(len(args))
+	q.newestFirst("payments", "$1", f.Cursor, f.Limit)
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.QueryContext(ctx, q.String(), q.args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []domain.Payment
-	for rows.Next() {
-		p, err := scanPayment(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *p)
-	}
-	return out, rows.Err()
+	return collect(rows, scanPayment)
 }
 
 func scanPayment(row scanner) (*domain.Payment, error) {
@@ -210,12 +178,7 @@ func scanPayment(row scanner) (*domain.Payment, error) {
 		return nil, err
 	}
 	p.Action = domain.PaymentAction(a)
-	if expiresAt.Valid {
-		p.ExpiresAt = expiresAt.Time
-	}
-	if paidAt.Valid {
-		t := paidAt.Time
-		p.PaidAt = &t
-	}
+	p.ExpiresAt = expiresAt.Time // zero when NULL
+	p.PaidAt = timePtr(paidAt)
 	return &p, nil
 }

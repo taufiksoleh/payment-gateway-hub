@@ -21,7 +21,7 @@ func TestList_ValidatesFilter(t *testing.T) {
 		"unknown provider": {Provider: "stripe"},
 		"empty range":      {CreatedFrom: now, CreatedTo: now},
 		"inverted range":   {CreatedFrom: now, CreatedTo: now.Add(-time.Hour)},
-		"limit too big":    {Limit: usecase.MaxPaymentPageSize + 1},
+		"limit too big":    {Limit: usecase.MaxPageSize + 1},
 		"negative limit":   {Limit: -1},
 	}
 	for name, filter := range tests {

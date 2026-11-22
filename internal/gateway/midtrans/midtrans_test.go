@@ -32,8 +32,8 @@ func newServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request
 	}))
 	t.Cleanup(srv.Close)
 	return midtrans.New(midtrans.Options{
-		SandboxURL: srv.URL,
-		Now:        func() time.Time { return time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC) },
+		Endpoints: gateway.Endpoints{Sandbox: srv.URL},
+		Now:       func() time.Time { return time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC) },
 	})
 }
 

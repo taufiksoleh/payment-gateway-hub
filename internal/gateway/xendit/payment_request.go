@@ -7,8 +7,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 )
 
-// Request and response shapes for /payment_requests. Only the fields the hub
-// uses are declared.
+// Wire types for /payment_requests, limited to the fields the hub uses.
 
 type paymentRequest struct {
 	ReferenceID   string        `json:"reference_id"`
@@ -35,14 +34,14 @@ type channelDetails struct {
 }
 
 type channelProperties struct {
-	// request
+	// Request fields
 	CustomerName     string `json:"customer_name,omitempty"`
 	ExpiresAt        string `json:"expires_at,omitempty"`
 	MobileNumber     string `json:"mobile_number,omitempty"`
 	SuccessReturnURL string `json:"success_return_url,omitempty"`
 	FailureReturnURL string `json:"failure_return_url,omitempty"`
 
-	// response
+	// Response fields
 	VirtualAccountNumber string `json:"virtual_account_number,omitempty"`
 	QRString             string `json:"qr_string,omitempty"`
 	PaymentCode          string `json:"payment_code,omitempty"`
@@ -103,11 +102,10 @@ var retailChannels = map[domain.Channel]string{
 	domain.ChannelIndomaret: "INDOMARET",
 }
 
-// buildPaymentRequest turns a hub request into a Xendit payment request.
 func buildPaymentRequest(req gateway.CreatePaymentRequest) (*paymentRequest, error) {
 	props := channelProperties{CustomerName: req.Customer.Name}
 	if props.CustomerName == "" {
-		props.CustomerName = "Customer" // required by VA and retail channels
+		props.CustomerName = "Customer" // required for VA and retail channels
 	}
 	if !req.ExpiresAt.IsZero() {
 		props.ExpiresAt = req.ExpiresAt.UTC().Format(time.RFC3339)
@@ -115,9 +113,7 @@ func buildPaymentRequest(req gateway.CreatePaymentRequest) (*paymentRequest, err
 
 	pm := paymentMethod{
 		Reusability: "ONE_TIME_USE",
-		// Same reference as the payment request, so payment_method.* webhooks
-		// (e.g. expiry) can be matched back to the hub payment.
-		ReferenceID: req.PaymentID,
+		ReferenceID: req.PaymentID, // lets payment_method.* webhooks find the payment
 	}
 	unsupported := gateway.UnsupportedChannel(domain.ProviderXendit, req.Method, req.Channel)
 
@@ -173,7 +169,6 @@ func buildPaymentRequest(req gateway.CreatePaymentRequest) (*paymentRequest, err
 	}, nil
 }
 
-// details returns whichever channel block is set.
 func (pm paymentMethod) details() *channelDetails {
 	for _, d := range []*channelDetails{pm.VirtualAccount, pm.QRCode, pm.EWallet, pm.OverTheCounter} {
 		if d != nil {

@@ -47,8 +47,8 @@ func TestCreatePayment_SignsRequest(t *testing.T) {
 	defer srv.Close()
 
 	g := doku.New(doku.Options{
-		SandboxURL: srv.URL,
-		Now:        func() time.Time { return time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC) },
+		Endpoints: gateway.Endpoints{Sandbox: srv.URL},
+		Now:       func() time.Time { return time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC) },
 	})
 	res, err := g.CreatePayment(context.Background(), cred, gateway.CreatePaymentRequest{
 		PaymentID: "pay_1", Amount: 15000, Currency: "IDR",

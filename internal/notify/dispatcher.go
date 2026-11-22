@@ -4,47 +4,47 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 )
 
-// MerchantFinder looks up where and how to deliver. The webhook URL and
-// secret are read at delivery time, so retries use the merchant's current
-// settings.
+// MerchantFinder is read at delivery time, so retries use the merchant's
+// current webhook URL and secret.
 type MerchantFinder interface {
 	FindByID(ctx context.Context, id string) (*domain.Merchant, error)
 }
 
-// Dispatcher delivers outbox messages to merchants.
+// Dispatcher delivers due outbox messages to merchants.
 type Dispatcher struct {
 	store     outbox.Store
 	merchants MerchantFinder
 	sender    *Sender
 	log       *slog.Logger
 
-	// Exported so tests and the composition root can tune them.
-	Interval  time.Duration    // how often to look for due messages
-	BatchSize int              // messages claimed per round
-	Now       func() time.Time // clock
+	Interval    time.Duration // polling interval
+	BatchSize   int           // messages claimed per round
+	Concurrency int           // deliveries in flight per round
+	Now         func() time.Time
 }
 
-// NewDispatcher builds a Dispatcher polling every second.
 func NewDispatcher(store outbox.Store, merchants MerchantFinder, sender *Sender, log *slog.Logger) *Dispatcher {
 	return &Dispatcher{
-		store:     store,
-		merchants: merchants,
-		sender:    sender,
-		log:       log,
-		Interval:  time.Second,
-		BatchSize: 20,
-		Now:       time.Now,
+		store:       store,
+		merchants:   merchants,
+		sender:      sender,
+		log:         log,
+		Interval:    time.Second,
+		BatchSize:   20,
+		Concurrency: 8,
+		Now:         time.Now,
 	}
 }
 
-// Run delivers messages until ctx ends. When a round fills a whole batch it
-// starts the next one immediately to drain a backlog.
+// Run delivers messages until ctx ends. A full batch starts the next round
+// immediately, to drain a backlog.
 func (d *Dispatcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
@@ -64,22 +64,32 @@ func (d *Dispatcher) Run(ctx context.Context) {
 	}
 }
 
-// DispatchOnce claims one batch of due messages, delivers them, and returns
-// how many it tried.
+// DispatchOnce claims one batch and delivers it with up to Concurrency
+// requests in flight, so one slow merchant does not hold up the others. It
+// returns how many messages it attempted.
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	msgs, err := d.store.ClaimDue(ctx, d.Now(), d.BatchSize, outbox.Lease)
 	if err != nil {
 		return 0, err
 	}
+
+	slots := make(chan struct{}, max(1, d.Concurrency))
+	var wg sync.WaitGroup
 	for _, m := range msgs {
-		d.deliver(ctx, m)
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			d.deliver(ctx, m)
+		}()
 	}
+	wg.Wait()
 	return len(msgs), nil
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, m outbox.Message) {
-	// Record the outcome even if we are shutting down, otherwise the
-	// message waits for its lease to expire before being retried.
+	// Record outcomes even during shutdown; otherwise the message waits for
+	// its lease to expire before it is retried.
 	markCtx := context.WithoutCancel(ctx)
 	log := d.log.With("event_id", m.ID, "type", m.Type, "merchant_id", m.MerchantID)
 
@@ -89,13 +99,13 @@ func (d *Dispatcher) deliver(ctx context.Context, m outbox.Message) {
 		return
 	}
 	if err != nil {
-		// Our database hiccuped; the lease expires and the message is
-		// retried without counting an attempt against the merchant.
+		// Our failure, not the merchant's: let the lease expire without
+		// counting an attempt.
 		log.Warn("load merchant for webhook", "error", err)
 		return
 	}
 	if merchant.WebhookURL == "" {
-		d.mark(log, d.store.MarkDelivered(markCtx, m.ID, d.Now())) // nowhere to send
+		d.mark(log, d.store.MarkDelivered(markCtx, m.ID, d.Now()))
 		return
 	}
 

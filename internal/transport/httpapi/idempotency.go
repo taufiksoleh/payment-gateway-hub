@@ -15,26 +15,16 @@ import (
 )
 
 const (
-	// IdempotencyKeyHeader is sent by clients; the value is any unique
-	// string up to 255 characters, typically a UUID.
-	IdempotencyKeyHeader = "Idempotency-Key"
-
-	// ReplayedHeader is set on responses served from a stored result.
-	ReplayedHeader = "Idempotent-Replayed"
-
+	IdempotencyKeyHeader    = "Idempotency-Key"
+	ReplayedHeader          = "Idempotent-Replayed" // set on replayed responses
 	maxIdempotencyKeyLength = 255
 )
 
-// idempotent makes a route safe to retry. It must run after requireMerchant.
-//
-//	no header                       → handled normally
-//	new key                         → handled; a 2xx response is stored
-//	same key, same request, done    → stored response replayed
-//	same key, same request, running → 409 idempotency_in_progress
-//	same key, different request     → 422 idempotency_key_reused
-//
-// Only 2xx responses are stored. A failed attempt changed nothing that a
-// retry could duplicate, so its key is released and the client may retry.
+// idempotent makes a route safe to retry; it must run after requireMerchant.
+// A repeated key replays the stored response, gets 409 while the first
+// request is still running, and 422 if the request differs. Only 2xx
+// responses are stored: other outcomes release the key so the client can
+// retry.
 func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,18 +34,14 @@ func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 				return
 			}
 			if !validIdempotencyKey(key) {
-				writeJSON(w, http.StatusUnprocessableEntity, errorBody{Error: errorDetail{
-					Code: "invalid_input", Field: IdempotencyKeyHeader,
-					Message: "must be 1-255 printable ASCII characters",
-				}})
+				writeProblem(w, http.StatusUnprocessableEntity, "invalid_input", IdempotencyKeyHeader,
+					"must be 1-255 printable ASCII characters")
 				return
 			}
 
-			// Read the body once to fingerprint it, then hand a fresh
-			// reader to the handler.
 			body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 			if err != nil {
-				writeJSON(w, http.StatusBadRequest, errorBody{Error: errorDetail{Code: "invalid_input", Message: "cannot read request body"}})
+				writeProblem(w, http.StatusBadRequest, "invalid_input", "", "cannot read request body")
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
@@ -79,14 +65,13 @@ func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 				return
 			}
 
-			// We hold the claim: run the handler into a buffer, settle the
-			// claim, then send the response. Settling must happen even if
-			// the client went away, hence WithoutCancel.
+			// The claim is ours. Buffer the response, settle the claim (even
+			// if the client left), then send the response.
 			settleCtx := context.WithoutCancel(r.Context())
 			rec := &bufferedResponse{header: w.Header(), status: http.StatusOK}
 			settled := false
 			defer func() {
-				if !settled { // handler panicked: let the client retry
+				if !settled { // the handler panicked
 					_ = store.Release(settleCtx, claim.MerchantID, key, claim.Token)
 				}
 			}()
@@ -99,9 +84,7 @@ func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 				err = store.Release(settleCtx, claim.MerchantID, key, claim.Token)
 			}
 			settled = true
-			if err != nil {
-				// The work is done; failing to remember it only weakens
-				// future retries, so still return the real response.
+			if err != nil { // the work is done; still return its response
 				log.ErrorContext(r.Context(), "idempotency settle failed", "key", key, "error", err)
 			}
 
@@ -114,15 +97,11 @@ func idempotent(store idempotency.Store, log *slog.Logger) middleware {
 func replayOrReject(w http.ResponseWriter, existing *idempotency.Record, requestHash string) {
 	switch {
 	case existing.RequestHash != requestHash:
-		writeJSON(w, http.StatusUnprocessableEntity, errorBody{Error: errorDetail{
-			Code: "idempotency_key_reused", Field: IdempotencyKeyHeader,
-			Message: "this key was already used for a different request",
-		}})
+		writeProblem(w, http.StatusUnprocessableEntity, "idempotency_key_reused", IdempotencyKeyHeader,
+			"this key was already used for a different request")
 	case existing.InProgress():
-		writeJSON(w, http.StatusConflict, errorBody{Error: errorDetail{
-			Code:    "idempotency_in_progress",
-			Message: "a request with this key is still being processed, retry shortly",
-		}})
+		writeProblem(w, http.StatusConflict, "idempotency_in_progress", "",
+			"a request with this key is still being processed, retry shortly")
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(ReplayedHeader, "true")
@@ -131,8 +110,7 @@ func replayOrReject(w http.ResponseWriter, existing *idempotency.Record, request
 	}
 }
 
-// requestHash fingerprints what the request asks for. Reusing a key for a
-// different endpoint or body is a client bug and is rejected.
+// requestHash fingerprints method, path and body.
 func requestHash(r *http.Request, body []byte) string {
 	h := sha256.New()
 	h.Write([]byte(r.Method + " " + r.URL.Path + "\n"))
@@ -152,8 +130,8 @@ func validIdempotencyKey(k string) bool {
 	return true
 }
 
-// bufferedResponse captures a handler's response instead of sending it.
-// Headers go straight to the real writer's header map.
+// bufferedResponse holds a handler's status and body; headers go straight to
+// the real writer.
 type bufferedResponse struct {
 	header http.Header
 	status int

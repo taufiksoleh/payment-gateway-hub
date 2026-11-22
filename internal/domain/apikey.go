@@ -2,32 +2,31 @@ package domain
 
 import "time"
 
-// APIKey authenticates a merchant. A merchant may hold several keys at once,
-// which is what makes rotation possible without downtime: the new key is
-// issued, deployments switch to it, and the old key expires after a grace
-// period.
+// APIKey authenticates a merchant. A merchant can hold several keys, so a key
+// can be rotated without downtime.
 type APIKey struct {
 	ID         string
 	MerchantID string
-	Hash       string // one-way hash; the raw key is shown once and never stored
-	Hint       string // last 4 characters, to tell keys apart in listings
+	Hash       string // sha256 of the raw key; the raw key is never stored
+	Hint       string // last 4 characters of the raw key
 	CreatedAt  time.Time
-	ExpiresAt  *time.Time // nil = no expiry
-	RevokedAt  *time.Time // nil = not revoked
-	LastUsedAt *time.Time // updated at most once a minute
+	ExpiresAt  *time.Time
+	RevokedAt  *time.Time
+	LastUsedAt *time.Time
 }
 
-// APIKeyStatus is a key's state at a point in time.
 type APIKeyStatus string
 
 const (
-	APIKeyActive   APIKeyStatus = "active"   // valid, no expiry
-	APIKeyExpiring APIKeyStatus = "expiring" // valid until ExpiresAt (grace period)
+	APIKeyActive   APIKeyStatus = "active"
+	APIKeyExpiring APIKeyStatus = "expiring" // still valid, in its grace period
 	APIKeyExpired  APIKeyStatus = "expired"
 	APIKeyRevoked  APIKeyStatus = "revoked"
 )
 
-// Status derives the key's state at now.
+// MaxRotationGrace bounds how long a replaced key keeps working.
+const MaxRotationGrace = 7 * 24 * time.Hour
+
 func (k APIKey) Status(now time.Time) APIKeyStatus {
 	switch {
 	case k.RevokedAt != nil:
@@ -46,6 +45,3 @@ func (k APIKey) Usable(now time.Time) bool {
 	s := k.Status(now)
 	return s == APIKeyActive || s == APIKeyExpiring
 }
-
-// MaxRotationGrace bounds how long a replaced key keeps working.
-const MaxRotationGrace = 7 * 24 * time.Hour

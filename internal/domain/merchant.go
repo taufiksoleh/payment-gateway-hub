@@ -6,19 +6,15 @@ import (
 	"time"
 )
 
-// Merchant is a hub customer. A merchant authenticates with API keys (see
-// APIKey) and brings its own accounts at each payment gateway (see
-// GatewayCredential).
 type Merchant struct {
 	ID            string
 	Name          string
-	WebhookURL    string // where the hub sends payment status updates
-	WebhookSecret string // used to sign outbound webhooks
+	WebhookURL    string // receives payment events; empty disables delivery
+	WebhookSecret string // signs outbound webhooks
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
 
-// NewMerchant validates input and builds a Merchant.
 func NewMerchant(id, name, webhookURL, webhookSecret string, now time.Time) (*Merchant, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -40,9 +36,8 @@ func NewMerchant(id, name, webhookURL, webhookSecret string, now time.Time) (*Me
 	}, nil
 }
 
-// GatewayCredential holds a merchant's own keys for one provider.
-// Secrets are vendor specific (e.g. Midtrans "server_key"); each gateway
-// adapter documents and validates the keys it needs.
+// GatewayCredential is a merchant's own account at one provider. The secret
+// keys are provider specific and validated by the provider's adapter.
 type GatewayCredential struct {
 	MerchantID  string
 	Provider    Provider
@@ -52,7 +47,6 @@ type GatewayCredential struct {
 	UpdatedAt   time.Time
 }
 
-// Secret returns a secret value, or "" when it is missing.
 func (c GatewayCredential) Secret(key string) string {
 	return c.Secrets[key]
 }

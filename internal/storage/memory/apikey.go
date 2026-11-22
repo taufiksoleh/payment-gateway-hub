@@ -10,8 +10,8 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
-// APIKeyRepo stores API keys in a map. One mutex serializes everything,
-// which gives Rotate and Revoke the per-merchant atomicity the port asks for.
+// APIKeyRepo serializes all operations with one mutex, which covers the
+// per-merchant atomicity Rotate and Revoke require.
 type APIKeyRepo struct {
 	mu   sync.Mutex
 	byID map[string]*domain.APIKey

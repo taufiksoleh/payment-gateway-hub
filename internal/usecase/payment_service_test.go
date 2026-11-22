@@ -55,7 +55,9 @@ func setupWithRepo(t *testing.T, newRepo func(*memory.Outbox) usecase.PaymentRep
 	merchantRepo := memory.NewMerchantRepo()
 	credRepo := memory.NewCredentialRepo()
 
-	merchants := usecase.NewMerchantService(merchantRepo, memory.NewAPIKeyRepo(), credRepo, registry)
+	merchants := usecase.NewMerchantService(usecase.MerchantServiceDeps{
+		Merchants: merchantRepo, Keys: memory.NewAPIKeyRepo(), Creds: credRepo, Gateways: registry,
+	})
 	reg, err := merchants.Register(ctx, usecase.RegisterMerchantInput{Name: "Toko", WebhookURL: "https://toko.example/hook"})
 	if err != nil {
 		t.Fatal(err)

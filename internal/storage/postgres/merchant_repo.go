@@ -7,7 +7,6 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 )
 
-// MerchantRepo implements usecase.MerchantRepository.
 type MerchantRepo struct {
 	db *sql.DB
 }
@@ -31,7 +30,7 @@ func (r *MerchantRepo) FindByID(ctx context.Context, id string) (*domain.Merchan
 		`SELECT `+merchantColumns+` FROM merchants WHERE id = $1`, id))
 }
 
-func scanMerchant(row *sql.Row) (*domain.Merchant, error) {
+func scanMerchant(row scanner) (*domain.Merchant, error) {
 	var m domain.Merchant
 	err := row.Scan(&m.ID, &m.Name, &m.WebhookURL, &m.WebhookSecret, &m.CreatedAt, &m.UpdatedAt)
 	if err != nil {

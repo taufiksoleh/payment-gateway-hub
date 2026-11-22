@@ -7,8 +7,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 )
 
-// Request and response shapes for POST /v2/charge. Only the fields the hub
-// uses are declared.
+// Wire types for /v2/charge, limited to the fields the hub uses.
 
 type chargeRequest struct {
 	PaymentType        string             `json:"payment_type"`
@@ -102,7 +101,6 @@ type refundResponse struct {
 	RefundKey string `json:"refund_key"`
 }
 
-// vaBanks maps hub channels to Midtrans bank_transfer banks.
 var vaBanks = map[domain.Channel]string{
 	domain.ChannelBCA:     "bca",
 	domain.ChannelBNI:     "bni",
@@ -111,7 +109,6 @@ var vaBanks = map[domain.Channel]string{
 	domain.ChannelPermata: "permata",
 }
 
-// buildCharge turns a hub request into a Midtrans charge request.
 func (g *Gateway) buildCharge(req gateway.CreatePaymentRequest) (*chargeRequest, error) {
 	c := &chargeRequest{
 		TransactionDetails: transactionDetails{OrderID: req.PaymentID, GrossAmount: req.Amount},
@@ -122,7 +119,7 @@ func (g *Gateway) buildCharge(req gateway.CreatePaymentRequest) (*chargeRequest,
 	if !req.ExpiresAt.IsZero() {
 		now := g.now()
 		c.CustomExpiry = &customExpiry{
-			OrderTime:      now.In(wib).Format(timeLayout + " -0700"),
+			OrderTime:      now.In(gateway.WIB).Format(timeLayout + " -0700"),
 			ExpiryDuration: int(math.Ceil(req.ExpiresAt.Sub(now).Minutes())),
 			Unit:           "minute",
 		}
@@ -161,15 +158,12 @@ func (g *Gateway) buildCharge(req gateway.CreatePaymentRequest) (*chargeRequest,
 		c.PaymentType = "cstore"
 		c.CStore = &convenienceStore{Store: string(req.Channel), Message: req.Description}
 
-	default:
-		// Cards need client-side tokenization (Midtrans Snap/JS), which is
-		// outside a server-to-server hub.
+	default: // cards need client-side tokenization (Snap/JS)
 		return nil, unsupported
 	}
 	return c, nil
 }
 
-// action extracts customer instructions from a charge response.
 func (r chargeResponse) action() domain.PaymentAction {
 	a := domain.PaymentAction{PaymentCode: r.PaymentCode, QRString: r.QRString}
 	if len(r.VANumbers) > 0 {

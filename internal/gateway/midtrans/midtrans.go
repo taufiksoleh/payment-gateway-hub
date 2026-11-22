@@ -1,20 +1,13 @@
-// Package midtrans adapts the Midtrans Core API to the gateway.Gateway port.
+// Package midtrans adapts the Midtrans Core API
+// (https://docs.midtrans.com/reference/core-api).
 //
-// Docs: https://docs.midtrans.com/reference/core-api
-//
-// Required secrets:
-//
-//	server_key  Midtrans dashboard → Settings → Access Keys
-//
-// Webhook: set the Payment Notification URL in the Midtrans dashboard to
-// https://<hub>/webhooks/midtrans/<merchant_id>.
+// Secrets: server_key (dashboard → Settings → Access Keys).
+// Notification URL: https://<hub>/webhooks/midtrans/<merchant_id>.
 package midtrans
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,49 +17,31 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 )
 
-const (
-	SecretServerKey = "server_key"
+const SecretServerKey = "server_key"
 
-	defaultSandboxURL    = "https://api.sandbox.midtrans.com"
-	defaultProductionURL = "https://api.midtrans.com"
-)
+var defaultEndpoints = gateway.Endpoints{
+	Sandbox:    "https://api.sandbox.midtrans.com",
+	Production: "https://api.midtrans.com",
+}
 
-// Midtrans reports times in Western Indonesia Time (UTC+7).
-var wib = time.FixedZone("WIB", 7*60*60)
+const timeLayout = "2006-01-02 15:04:05" // Midtrans times are in WIB
 
-// Options configures the adapter. Zero values use Midtrans defaults; tests
-// override the URLs with an httptest server.
 type Options struct {
-	HTTPClient    *http.Client
-	SandboxURL    string
-	ProductionURL string
-	Now           func() time.Time
+	HTTPClient *http.Client
+	Endpoints  gateway.Endpoints // overrides for tests
+	Now        func() time.Time
 }
 
-// Gateway talks to Midtrans.
 type Gateway struct {
-	client        *http.Client
-	sandboxURL    string
-	productionURL string
-	now           func() time.Time
+	client    *http.Client
+	endpoints gateway.Endpoints
+	now       func() time.Time
 }
 
-// New builds a Midtrans adapter.
 func New(opts Options) *Gateway {
-	g := &Gateway{
-		client:        opts.HTTPClient,
-		sandboxURL:    opts.SandboxURL,
-		productionURL: opts.ProductionURL,
-		now:           opts.Now,
-	}
+	g := &Gateway{client: opts.HTTPClient, endpoints: opts.Endpoints.Or(defaultEndpoints), now: opts.Now}
 	if g.client == nil {
-		g.client = &http.Client{Timeout: 30 * time.Second}
-	}
-	if g.sandboxURL == "" {
-		g.sandboxURL = defaultSandboxURL
-	}
-	if g.productionURL == "" {
-		g.productionURL = defaultProductionURL
+		g.client = gateway.DefaultHTTPClient()
 	}
 	if g.now == nil {
 		g.now = time.Now
@@ -74,8 +49,10 @@ func New(opts Options) *Gateway {
 	return g
 }
 
-var _ gateway.Gateway = (*Gateway)(nil)
-var _ gateway.Refunder = (*Gateway)(nil)
+var (
+	_ gateway.Gateway  = (*Gateway)(nil)
+	_ gateway.Refunder = (*Gateway)(nil)
+)
 
 func (g *Gateway) Provider() domain.Provider { return domain.ProviderMidtrans }
 
@@ -83,7 +60,6 @@ func (g *Gateway) ValidateCredentials(cred domain.GatewayCredential) error {
 	return gateway.RequireSecrets(cred, SecretServerKey)
 }
 
-// CreatePayment calls POST /v2/charge.
 func (g *Gateway) CreatePayment(ctx context.Context, cred domain.GatewayCredential, req gateway.CreatePaymentRequest) (*gateway.CreatePaymentResult, error) {
 	body, err := g.buildCharge(req)
 	if err != nil {
@@ -93,15 +69,17 @@ func (g *Gateway) CreatePayment(ctx context.Context, cred domain.GatewayCredenti
 	if err := g.call(ctx, cred, http.MethodPost, "/v2/charge", body, &res); err != nil {
 		return nil, err
 	}
-	return &gateway.CreatePaymentResult{
+	result := &gateway.CreatePaymentResult{
 		ProviderRef: res.TransactionID,
 		Status:      mapStatus(res.TransactionStatus, res.FraudStatus),
 		Action:      res.action(),
-		ExpiresAt:   parseTime(res.ExpiryTime),
-	}, nil
+	}
+	if t := parseTime(res.ExpiryTime); t != nil {
+		result.ExpiresAt = *t
+	}
+	return result, nil
 }
 
-// GetStatus calls GET /v2/{order_id}/status.
 func (g *Gateway) GetStatus(ctx context.Context, cred domain.GatewayCredential, ref gateway.PaymentRef) (*gateway.StatusResult, error) {
 	var res chargeResponse
 	path := "/v2/" + url.PathEscape(ref.PaymentID) + "/status"
@@ -111,13 +89,11 @@ func (g *Gateway) GetStatus(ctx context.Context, cred domain.GatewayCredential, 
 	return &gateway.StatusResult{
 		ProviderRef: res.TransactionID,
 		Status:      mapStatus(res.TransactionStatus, res.FraudStatus),
-		PaidAt:      parseTimePtr(res.SettlementTime),
+		PaidAt:      parseTime(res.SettlementTime),
 	}, nil
 }
 
-// Refund calls POST /v2/{order_id}/refund. Midtrans supports API refunds for
-// cards, GoPay, ShopeePay and QRIS; other methods return an error from
-// Midtrans.
+// Refund works for cards, GoPay, ShopeePay and QRIS; Midtrans rejects others.
 func (g *Gateway) Refund(ctx context.Context, cred domain.GatewayCredential, req gateway.RefundRequest) (*gateway.RefundResult, error) {
 	body := refundRequest{RefundKey: req.RefundID, Amount: req.Amount, Reason: req.Reason}
 	var res refundResponse
@@ -128,20 +104,17 @@ func (g *Gateway) Refund(ctx context.Context, cred domain.GatewayCredential, req
 	return &gateway.RefundResult{ProviderRef: res.RefundKey}, nil
 }
 
-// call sends one request and decodes the response into out. Midtrans may
-// return HTTP 200 with an error in "status_code", so both are checked.
+// call checks both the HTTP status and the body's status_code, because
+// Midtrans can answer HTTP 200 with an error inside.
 func (g *Gateway) call(ctx context.Context, cred domain.GatewayCredential, method, path string, in, out any) error {
-	var raw []byte
-	if in != nil {
-		var err error
-		if raw, err = json.Marshal(in); err != nil {
-			return fmt.Errorf("midtrans: encode request: %w", err)
-		}
+	raw, err := gateway.EncodeJSON(in)
+	if err != nil {
+		return err
 	}
 	resp, err := gateway.Do(ctx, g.client, gateway.HTTPRequest{
 		Method:  method,
-		URL:     g.baseURL(cred.Environment) + path,
-		Headers: map[string]string{"Authorization": basicAuth(cred.Secret(SecretServerKey))},
+		URL:     g.endpoints.For(cred.Environment) + path,
+		Headers: map[string]string{"Authorization": gateway.BasicAuth(cred.Secret(SecretServerKey))},
 		Body:    raw,
 	})
 	if err != nil {
@@ -160,19 +133,7 @@ func (g *Gateway) call(ctx context.Context, cred domain.GatewayCredential, metho
 	return gateway.DecodeJSON(domain.ProviderMidtrans, resp.Body, out)
 }
 
-func (g *Gateway) baseURL(env domain.Environment) string {
-	if env == domain.EnvironmentProduction {
-		return g.productionURL
-	}
-	return g.sandboxURL
-}
-
-// basicAuth: Midtrans uses the server key as username and an empty password.
-func basicAuth(serverKey string) string {
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(serverKey+":"))
-}
-
-// mapStatus translates Midtrans transaction_status into the hub status.
+// mapStatus follows
 // https://docs.midtrans.com/docs/https-notification-webhooks#transaction-status
 func mapStatus(transactionStatus, fraudStatus string) domain.Status {
 	switch transactionStatus {
@@ -193,25 +154,11 @@ func mapStatus(transactionStatus, fraudStatus string) domain.Status {
 		return domain.StatusRefunded
 	case "partial_refund":
 		return domain.StatusPartiallyRefunded
-	default: // "pending", "authorize"
+	default: // pending, authorize
 		return domain.StatusPending
 	}
 }
 
-const timeLayout = "2006-01-02 15:04:05"
-
-func parseTime(s string) time.Time {
-	t, err := time.ParseInLocation(timeLayout, s, wib)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
-}
-
-func parseTimePtr(s string) *time.Time {
-	t := parseTime(s)
-	if t.IsZero() {
-		return nil
-	}
-	return &t
+func parseTime(s string) *time.Time {
+	return gateway.ParseTime(timeLayout, s, gateway.WIB)
 }

@@ -2,22 +2,19 @@ package outbox
 
 import "time"
 
-// Status is where a message is in its life.
 type Status string
 
 const (
-	StatusPending   Status = "pending"   // waiting for its first or next attempt
-	StatusDelivered Status = "delivered" // the merchant answered 2xx (or had no URL)
-	StatusDead      Status = "dead"      // gave up after MaxAttempts
+	StatusPending   Status = "pending"
+	StatusDelivered Status = "delivered" // 2xx answer, or no webhook URL
+	StatusDead      Status = "dead"      // exhausted MaxAttempts
 )
 
-// Valid reports whether s is a known status.
 func (s Status) Valid() bool {
 	return s == StatusPending || s == StatusDelivered || s == StatusDead
 }
 
-// Delivery is a message plus its delivery state, as merchants see it when
-// inspecting their webhooks.
+// Delivery is a message with its delivery state.
 type Delivery struct {
 	Message
 	NextAttemptAt time.Time
@@ -26,7 +23,6 @@ type Delivery struct {
 	DeadAt        *time.Time
 }
 
-// Status derives the delivery status from the timestamps.
 func (d Delivery) Status() Status {
 	switch {
 	case d.DeadAt != nil:
@@ -38,9 +34,9 @@ func (d Delivery) Status() Status {
 	}
 }
 
-// ListFilter narrows a merchant's webhook list. Results are newest first.
+// ListFilter narrows a merchant's webhook list (newest first).
 type ListFilter struct {
-	Status Status // empty = any status
-	Limit  int    // already validated by the caller
-	Cursor string // id of the last item of the previous page; empty = first page
+	Status Status // empty: any
+	Limit  int
+	Cursor string // id of the last item on the previous page
 }

@@ -2,11 +2,13 @@ package notify_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -227,5 +229,36 @@ func TestDispatcher_DeliversReplayedDeadWebhook(t *testing.T) {
 	last := srv.bodies[len(srv.bodies)-1]
 	if string(last) != `{"id":"evt_1"}` {
 		t.Fatalf("replayed payload = %s", last)
+	}
+}
+
+// A slow merchant endpoint must not serialize the whole batch.
+func TestDispatcher_DeliversBatchConcurrently(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	var inFlight, peak atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := inFlight.Add(1)
+		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+		}
+		time.Sleep(delay)
+		inFlight.Add(-1)
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newDispatchFixture(t, srv.URL)
+	f.dispatcher.Concurrency = 8
+	for i := 0; i < 8; i++ {
+		f.enqueue(t, fmt.Sprintf("evt_%d", i))
+	}
+
+	start := time.Now()
+	if n := f.dispatch(t); n != 8 {
+		t.Fatalf("dispatched %d, want 8", n)
+	}
+	if elapsed := time.Since(start); elapsed > 4*delay {
+		t.Fatalf("batch took %v; deliveries ran sequentially", elapsed)
+	}
+	if peak.Load() < 2 {
+		t.Fatalf("peak concurrency %d, want > 1", peak.Load())
 	}
 }

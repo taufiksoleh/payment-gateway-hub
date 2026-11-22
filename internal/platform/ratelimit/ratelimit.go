@@ -1,12 +1,6 @@
-// Package ratelimit implements request rate limiting with token buckets.
-//
-// Each key (a merchant id, a client IP, ...) gets a bucket that holds up to
-// Burst tokens and refills continuously at PerMinute tokens per minute. A
-// request takes one token; when the bucket is empty it is refused.
-//
-// Buckets live in process memory, so with N hub instances behind a load
-// balancer each key effectively gets N times the limit. Implement Limiter on
-// top of a shared store (e.g. Redis) if that matters.
+// Package ratelimit implements per-key token buckets. Buckets live in process
+// memory, so N instances allow N times the limit; implement Limiter on a
+// shared store if that matters.
 package ratelimit
 
 import (
@@ -20,17 +14,14 @@ type Limiter interface {
 	Allow(key string) Decision
 }
 
-// Decision is the outcome of one Allow call, with what HTTP clients need to
-// back off politely.
 type Decision struct {
 	Allowed    bool
-	Limit      int           // bucket size (max burst)
-	Remaining  int           // whole tokens left after this request
-	RetryAfter time.Duration // when refused: wait until one token is back
-	ResetAfter time.Duration // until the bucket is full again
+	Limit      int // bucket size
+	Remaining  int
+	RetryAfter time.Duration // until the next token, when refused
+	ResetAfter time.Duration // until the bucket is full
 }
 
-// TokenBucket is an in-memory Limiter.
 type TokenBucket struct {
 	ratePerSec float64
 	burst      float64
@@ -46,11 +37,8 @@ type bucket struct {
 	last   time.Time
 }
 
-// sweepEvery bounds how often idle buckets are dropped.
 const sweepEvery = time.Minute
 
-// NewTokenBucket allows perMinute requests per minute per key, with bursts
-// of up to burst requests.
 func NewTokenBucket(perMinute, burst int) *TokenBucket {
 	return &TokenBucket{
 		ratePerSec: float64(perMinute) / 60,
@@ -66,7 +54,6 @@ func (tb *TokenBucket) WithClock(now func() time.Time) *TokenBucket {
 	return tb
 }
 
-// Allow takes one token from key's bucket if there is one.
 func (tb *TokenBucket) Allow(key string) Decision {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -76,7 +63,7 @@ func (tb *TokenBucket) Allow(key string) Decision {
 
 	b, ok := tb.buckets[key]
 	if !ok {
-		b = &bucket{tokens: tb.burst, last: now} // new keys start with a full bucket
+		b = &bucket{tokens: tb.burst, last: now}
 		tb.buckets[key] = b
 	}
 	b.tokens = tb.refilled(b, now)
@@ -94,19 +81,17 @@ func (tb *TokenBucket) Allow(key string) Decision {
 	return d
 }
 
-// Len returns how many buckets are held, for tests and metrics.
+// Len returns the number of buckets held.
 func (tb *TokenBucket) Len() int {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	return len(tb.buckets)
 }
 
-// refilled returns b's token count at now, capped at burst.
 func (tb *TokenBucket) refilled(b *bucket, now time.Time) float64 {
 	return math.Min(tb.burst, b.tokens+now.Sub(b.last).Seconds()*tb.ratePerSec)
 }
 
-// timeFor converts a number of tokens into the time needed to refill them.
 func (tb *TokenBucket) timeFor(tokens float64) time.Duration {
 	if tokens <= 0 || tb.ratePerSec == 0 {
 		return 0
@@ -114,9 +99,8 @@ func (tb *TokenBucket) timeFor(tokens float64) time.Duration {
 	return time.Duration(tokens / tb.ratePerSec * float64(time.Second))
 }
 
-// sweep drops buckets that have refilled completely: a new bucket would start
-// full anyway, so nothing is lost, and memory stays bounded by the number of
-// recently active keys.
+// sweep drops full buckets, which a new bucket would equal, so memory is
+// bounded by recently active keys.
 func (tb *TokenBucket) sweep(now time.Time) {
 	if now.Sub(tb.lastSweep) < sweepEvery {
 		return
@@ -129,8 +113,7 @@ func (tb *TokenBucket) sweep(now time.Time) {
 	}
 }
 
-// BurstFor derives a burst size from a per-minute rate: ten seconds' worth
-// of requests, but at least 5 so short scripts are not throttled.
+// BurstFor allows ten seconds' worth of requests at once, minimum 5.
 func BurstFor(perMinute int) int {
 	return max(5, perMinute/6)
 }

@@ -12,8 +12,9 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/id"
 )
 
-// PaymentService creates payments through providers and keeps their status
-// up to date from webhooks and status syncs.
+// maxUpdateAttempts bounds retries after losing the optimistic lock.
+const maxUpdateAttempts = 3
+
 type PaymentService struct {
 	payments PaymentRepository
 	creds    CredentialRepository
@@ -22,17 +23,14 @@ type PaymentService struct {
 	now      func() time.Time
 }
 
-// PaymentServiceDeps lists everything PaymentService needs. Using a struct
-// keeps the constructor readable as dependencies grow.
 type PaymentServiceDeps struct {
 	Payments PaymentRepository
 	Creds    CredentialRepository
 	Gateways GatewayResolver
-	Logger   *slog.Logger
-	Now      func() time.Time // optional, defaults to time.Now
+	Logger   *slog.Logger     // optional
+	Now      func() time.Time // optional
 }
 
-// NewPaymentService wires a PaymentService.
 func NewPaymentService(d PaymentServiceDeps) *PaymentService {
 	if d.Now == nil {
 		d.Now = time.Now
@@ -49,7 +47,6 @@ func NewPaymentService(d PaymentServiceDeps) *PaymentService {
 	}
 }
 
-// CreatePaymentInput is a merchant's request to collect money.
 type CreatePaymentInput struct {
 	OrderID     string
 	Provider    domain.Provider
@@ -63,10 +60,8 @@ type CreatePaymentInput struct {
 	ReturnURL   string
 }
 
-// Create opens a payment at the chosen provider.
-//
-// It is idempotent on (merchant, order id): repeating a request returns the
-// payment that already exists instead of charging twice.
+// Create opens a payment at the provider. A repeated order id returns the
+// existing payment instead of charging again.
 func (s *PaymentService) Create(ctx context.Context, merchantID string, in CreatePaymentInput) (*domain.Payment, error) {
 	existing, err := s.payments.FindByOrderID(ctx, merchantID, in.OrderID)
 	if err == nil {
@@ -98,8 +93,8 @@ func (s *PaymentService) Create(ctx context.Context, merchantID string, in Creat
 		return nil, err
 	}
 
-	// Call the provider before saving. If the provider fails nothing is
-	// stored, so the merchant can retry with the same order id.
+	// The provider is called before saving, so a failed call leaves nothing
+	// behind and the merchant can retry with the same order id.
 	res, err := gw.CreatePayment(ctx, *cred, gateway.CreatePaymentRequest{
 		PaymentID:   p.ID,
 		Amount:      p.Amount,
@@ -132,28 +127,27 @@ func (s *PaymentService) Create(ctx context.Context, merchantID string, in Creat
 	return p, nil
 }
 
-// Get returns a payment owned by the merchant.
+// Get hides payments of other merchants behind domain.ErrNotFound.
 func (s *PaymentService) Get(ctx context.Context, merchantID, paymentID string) (*domain.Payment, error) {
 	p, err := s.payments.FindByID(ctx, paymentID)
 	if err != nil {
 		return nil, err
 	}
 	if p.MerchantID != merchantID {
-		// Do not reveal that the id exists for another merchant.
 		return nil, domain.ErrNotFound
 	}
 	return p, nil
 }
 
-// Sync asks the provider for the latest status. Useful when a webhook was
-// missed.
+// Sync pulls the provider's status for a pending payment, for when a webhook
+// was missed.
 func (s *PaymentService) Sync(ctx context.Context, merchantID, paymentID string) (*domain.Payment, error) {
 	p, err := s.Get(ctx, merchantID, paymentID)
 	if err != nil {
 		return nil, err
 	}
 	if p.Status != domain.StatusPending {
-		return p, nil // only pending payments change on the provider side
+		return p, nil
 	}
 
 	gw, cred, err := s.gatewayFor(ctx, merchantID, p.Provider)
@@ -170,25 +164,14 @@ func (s *PaymentService) Sync(ctx context.Context, merchantID, paymentID string)
 	return p, nil
 }
 
-// RefundInput asks to refund part or all of a paid payment.
 type RefundInput struct {
-	Amount int64 // zero means the full refundable amount
+	Amount int64 // zero: the full refundable amount
 	Reason string
 }
 
-// Refund returns money to the customer, if the provider supports it.
-//
-// To make double refunds impossible, the amount is first reserved on the
-// payment and saved under the optimistic lock, and only then sent to the
-// provider:
-//
-//  1. reserve   a concurrent refund now sees less refundable money
-//  2. provider  the actual refund
-//  3. complete  (provider accepted) or release (provider rejected)
-//
-// If two refunds race, the second one loses the lock at step 1, reloads,
-// sees the reservation and fails validation, so it never reaches the
-// provider.
+// Refund reserves the amount on the payment before calling the provider. A
+// concurrent refund then loses the optimistic lock, reloads, sees the
+// reservation and fails validation without reaching the provider.
 func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID string, in RefundInput) (*domain.Payment, error) {
 	p, err := s.Get(ctx, merchantID, paymentID)
 	if err != nil {
@@ -210,18 +193,15 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		return nil, fmt.Errorf("%w: %s refunds must be done in the provider dashboard", domain.ErrUnsupported, p.Provider)
 	}
 
-	// 1. Reserve.
-	if _, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+	if err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
 		return true, p.ReserveRefund(in.Amount, s.now())
 	}); err != nil {
 		return nil, err
 	}
 
-	// From here on the reservation must be settled even if the client
-	// disconnects, so the remaining steps ignore request cancellation.
+	// The reservation must be settled even if the client disconnects.
 	ctx = context.WithoutCancel(ctx)
 
-	// 2. Provider.
 	_, err = refunder.Refund(ctx, *cred, gateway.RefundRequest{
 		RefundID: id.New("rfd"),
 		Ref:      gateway.PaymentRef{PaymentID: p.ID, ProviderRef: p.ProviderRef},
@@ -229,8 +209,7 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		Reason:   in.Reason,
 	})
 	if err != nil {
-		// 3b. Release, so the money can be refunded again later.
-		if _, rerr := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+		if rerr := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
 			return true, p.ReleaseRefund(in.Amount, s.now())
 		}); rerr != nil {
 			s.log.ErrorContext(ctx, "refund failed and reservation could not be released",
@@ -239,12 +218,11 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		return nil, fmt.Errorf("refund at %s: %w", p.Provider, err)
 	}
 
-	// 3a. Complete.
-	if _, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+	if err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
 		return true, p.CompleteRefund(in.Amount, s.now())
 	}); err != nil {
-		// The money is back with the customer and stays reserved, so it
-		// cannot be refunded twice; flag it for reconciliation.
+		// The money went back but stays reserved, so it cannot be refunded
+		// twice. Needs manual reconciliation.
 		s.log.ErrorContext(ctx, "refund accepted by provider but not recorded",
 			"payment_id", p.ID, "amount", in.Amount, "error", err)
 		return nil, err
@@ -252,7 +230,6 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 	return p, nil
 }
 
-// gatewayFor returns the adapter and the merchant's credential for a provider.
 func (s *PaymentService) gatewayFor(ctx context.Context, merchantID string, provider domain.Provider) (gateway.Gateway, *domain.GatewayCredential, error) {
 	gw, err := s.gateways.Get(provider)
 	if err != nil {
@@ -268,30 +245,24 @@ func (s *PaymentService) gatewayFor(ctx context.Context, merchantID string, prov
 	return gw, cred, nil
 }
 
-// statusUpdate is a status reported by a provider (webhook or sync).
+// statusUpdate is a status reported by a provider webhook or sync.
 type statusUpdate struct {
 	Status      domain.Status
 	PaidAt      *time.Time
 	ProviderRef string
 }
 
-// applyStatus moves p to the reported status and saves it. The payment records
-// an event when it actually changes; the repository stores that event in the
-// outbox with the payment, and the dispatcher notifies the merchant. Invalid transitions (e.g. a late
-// "pending" webhook after "paid") are logged and ignored.
+// applyStatus saves the reported status. Transitions the state machine
+// rejects (such as a late "pending" after "paid") are logged and ignored.
 func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, u statusUpdate) error {
-	_, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+	err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
 		if p.ProviderRef == "" && u.ProviderRef != "" {
 			p.ProviderRef = u.ProviderRef
 		}
 		if u.Status == domain.StatusPaid && u.PaidAt != nil && p.Status.CanTransitionTo(domain.StatusPaid) {
-			p.PaidAt = u.PaidAt // before the transition, so the recorded event carries it
+			p.PaidAt = u.PaidAt // set before the transition so the event carries it
 		}
-		changed, err := p.TransitionTo(u.Status, s.now())
-		if err != nil || !changed {
-			return false, err
-		}
-		return true, nil
+		return p.TransitionTo(u.Status, s.now())
 	})
 	if errors.Is(err, domain.ErrInvalidTransition) {
 		s.log.InfoContext(ctx, "ignoring status update", "payment_id", p.ID, "error", err)
@@ -300,37 +271,28 @@ func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, u s
 	return err
 }
 
-// maxUpdateAttempts bounds retries when other requests keep winning the
-// optimistic lock on the same payment.
-const maxUpdateAttempts = 3
-
-// update applies mutate to p and saves it with an optimistic lock.
-//
-// If another request saved the payment in between, the repository returns
-// domain.ErrConcurrentModification. update then reloads the latest version
-// and runs mutate again on it, so the change is neither lost nor applied on
-// top of stale data. For example, a "paid" webhook racing an "expired" sync
-// ends with exactly one of them winning and the other seeing a final status.
-//
-// mutate returns false to skip saving (nothing changed).
-func (s *PaymentService) update(ctx context.Context, p *domain.Payment, mutate func(*domain.Payment) (bool, error)) (bool, error) {
+// update applies mutate and saves p. If another request saved the payment
+// first, it reloads the latest version and applies mutate again, so no
+// change is lost or applied to stale data. mutate returns false when there
+// is nothing to save.
+func (s *PaymentService) update(ctx context.Context, p *domain.Payment, mutate func(*domain.Payment) (bool, error)) error {
 	for attempt := 1; ; attempt++ {
 		changed, err := mutate(p)
 		if err != nil || !changed {
-			return false, err
+			return err
 		}
 
 		err = s.payments.Update(ctx, p)
 		if err == nil {
-			return true, nil
+			return nil
 		}
 		if !errors.Is(err, domain.ErrConcurrentModification) || attempt == maxUpdateAttempts {
-			return false, fmt.Errorf("save payment %s: %w", p.ID, err)
+			return fmt.Errorf("save payment %s: %w", p.ID, err)
 		}
 
 		fresh, err := s.payments.FindByID(ctx, p.ID)
 		if err != nil {
-			return false, fmt.Errorf("reload payment %s: %w", p.ID, err)
+			return fmt.Errorf("reload payment %s: %w", p.ID, err)
 		}
 		*p = *fresh
 	}

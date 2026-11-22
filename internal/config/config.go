@@ -11,24 +11,25 @@ import (
 	"time"
 )
 
-// Config is every setting the hub reads at startup.
+// Config holds the settings read from the environment at startup. The env
+// var name and default are noted per field.
 type Config struct {
-	HTTPAddr        string        // HTTP_ADDR, default ":8080"
-	DatabaseURL     string        // DATABASE_URL, empty = in-memory storage
-	EncryptionKey   string        // ENCRYPTION_KEY, base64 32 bytes (openssl rand -base64 32)
-	AdminToken      string        // ADMIN_TOKEN, protects POST /v1/merchants
-	LogLevel        slog.Level    // LOG_LEVEL: debug, info, warn, error
-	ShutdownTimeout time.Duration // SHUTDOWN_TIMEOUT, default 15s
+	HTTPAddr        string        // HTTP_ADDR, ":8080"
+	DatabaseURL     string        // DATABASE_URL, empty selects in-memory storage
+	DBMaxOpenConns  int           // DB_MAX_OPEN_CONNS, 20
+	DBMaxIdleConns  int           // DB_MAX_IDLE_CONNS, 5
+	EncryptionKey   string        // ENCRYPTION_KEY, required, base64 of 32 bytes
+	AdminToken      string        // ADMIN_TOKEN, required
+	LogLevel        slog.Level    // LOG_LEVEL, info
+	ShutdownTimeout time.Duration // SHUTDOWN_TIMEOUT, 15s
 
-	// Requests per minute; 0 disables that limit. Bursts are derived
-	// (ratelimit.BurstFor).
-	RateLimitMerchantPerMin int  // RATE_LIMIT_MERCHANT_PER_MIN, default 600
-	RateLimitIPPerMin       int  // RATE_LIMIT_IP_PER_MIN, default 1200
-	RateLimitAdminPerMin    int  // RATE_LIMIT_ADMIN_PER_MIN, default 10
-	TrustProxy              bool // TRUST_PROXY: read client IPs from X-Forwarded-For
+	// Requests per minute; 0 disables the limit.
+	RateLimitMerchantPerMin int  // RATE_LIMIT_MERCHANT_PER_MIN, 600
+	RateLimitIPPerMin       int  // RATE_LIMIT_IP_PER_MIN, 1200
+	RateLimitAdminPerMin    int  // RATE_LIMIT_ADMIN_PER_MIN, 10
+	TrustProxy              bool // TRUST_PROXY, false
 }
 
-// Load reads the environment and validates required values.
 func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:      getEnv("HTTP_ADDR", ":8080"),
@@ -49,6 +50,8 @@ func Load() (Config, error) {
 	}
 	cfg.ShutdownTimeout = timeout
 
+	cfg.DBMaxOpenConns = getInt("DB_MAX_OPEN_CONNS", 20, &errs)
+	cfg.DBMaxIdleConns = getInt("DB_MAX_IDLE_CONNS", 5, &errs)
 	cfg.RateLimitMerchantPerMin = getInt("RATE_LIMIT_MERCHANT_PER_MIN", 600, &errs)
 	cfg.RateLimitIPPerMin = getInt("RATE_LIMIT_IP_PER_MIN", 1200, &errs)
 	cfg.RateLimitAdminPerMin = getInt("RATE_LIMIT_ADMIN_PER_MIN", 10, &errs)
@@ -66,7 +69,7 @@ func Load() (Config, error) {
 	return cfg, errors.Join(errs...)
 }
 
-// getInt reads a non-negative integer, recording a parse error in errs.
+// getInt reads a non-negative integer and records a parse error in errs.
 func getInt(key string, fallback int, errs *[]error) int {
 	v := getEnv(key, strconv.Itoa(fallback))
 	n, err := strconv.Atoi(v)

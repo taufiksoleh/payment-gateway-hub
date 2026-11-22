@@ -1,6 +1,5 @@
-// Package app is the composition root: the only place that knows every
-// concrete type and wires them together. Read this file top to bottom to see
-// how the whole hub fits.
+// Package app wires the concrete implementations together. It is the only
+// package that knows them all.
 package app
 
 import (
@@ -29,65 +28,56 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/migrations"
 )
 
-// App is a fully wired hub.
 type App struct {
-	cfg         config.Config
-	log         *slog.Logger
-	server      *http.Server
-	dispatcher  *notify.Dispatcher
-	outbox      outbox.Store
-	idempotency idempotency.Store
-	db          *sql.DB // nil when running in memory
+	cfg        config.Config
+	log        *slog.Logger
+	server     *http.Server
+	dispatcher *notify.Dispatcher
+	repos      *repositories
+	db         *sql.DB // nil with in-memory storage
 }
 
-// New builds every dependency from cfg.
 func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error) {
 	a := &App{cfg: cfg, log: log}
 
-	// 1. Gateways. To add a provider, add one line here.
-	providerHTTP := &http.Client{Timeout: 30 * time.Second}
+	providerClient := gateway.DefaultHTTPClient()
 	gateways := gateway.NewRegistry(
-		midtrans.New(midtrans.Options{HTTPClient: providerHTTP}),
-		xendit.New(xendit.Options{HTTPClient: providerHTTP}),
-		doku.New(doku.Options{HTTPClient: providerHTTP}),
+		midtrans.New(midtrans.Options{HTTPClient: providerClient}),
+		xendit.New(xendit.Options{HTTPClient: providerClient}),
+		doku.New(doku.Options{HTTPClient: providerClient}),
 	)
 
-	// 2. Storage.
-	repos, err := a.buildRepositories(ctx)
+	repos, err := a.openStorage(ctx)
 	if err != nil {
 		return nil, err
 	}
-	a.idempotency = repos.idempotency
-	a.outbox = repos.outbox
-
-	// 3. Merchant webhooks: payment changes land in the outbox (written by
-	//    the payment repository); the dispatcher delivers them with retries.
+	a.repos = repos
 	a.dispatcher = notify.NewDispatcher(repos.outbox, repos.merchants, notify.NewSender(nil), log)
 
-	// 4. Use cases.
-	merchants := usecase.NewMerchantService(repos.merchants, repos.apiKeys, repos.creds, gateways)
-	payments := usecase.NewPaymentService(usecase.PaymentServiceDeps{
-		Payments: repos.payments,
-		Creds:    repos.creds,
-		Gateways: gateways,
-		Logger:   log,
+	router := httpapi.NewRouter(httpapi.Deps{
+		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
+			Payments: repos.payments,
+			Creds:    repos.creds,
+			Gateways: gateways,
+			Logger:   log,
+		}),
+		Merchants: usecase.NewMerchantService(usecase.MerchantServiceDeps{
+			Merchants: repos.merchants,
+			Keys:      repos.apiKeys,
+			Creds:     repos.creds,
+			Gateways:  gateways,
+		}),
+		Webhooks:    usecase.NewWebhookService(repos.webhooks),
+		Providers:   gateways.Providers(),
+		AdminToken:  cfg.AdminToken,
+		Idempotency: repos.idempotency,
+		RateLimits:  rateLimits(cfg),
+		Logger:      log,
 	})
 
-	webhooks := usecase.NewWebhookService(repos.webhooks)
-
-	// 5. HTTP.
 	a.server = &http.Server{
-		Addr: cfg.HTTPAddr,
-		Handler: httpapi.NewRouter(httpapi.Deps{
-			Payments:    payments,
-			Merchants:   merchants,
-			Webhooks:    webhooks,
-			Providers:   gateways.Providers(),
-			AdminToken:  cfg.AdminToken,
-			Idempotency: repos.idempotency,
-			RateLimits:  rateLimits(cfg),
-			Logger:      log,
-		}),
+		Addr:              cfg.HTTPAddr,
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second, // provider calls can be slow
@@ -101,12 +91,12 @@ type repositories struct {
 	merchants   usecase.MerchantRepository
 	apiKeys     usecase.APIKeyRepository
 	creds       usecase.CredentialRepository
-	idempotency idempotency.Store
+	webhooks    usecase.WebhookRepository
 	outbox      outbox.Store
-	webhooks    usecase.WebhookRepository // same store as outbox, merchant-facing view
+	idempotency idempotency.Store
 }
 
-func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
+func (a *App) openStorage(ctx context.Context) (*repositories, error) {
 	if a.cfg.DatabaseURL == "" {
 		a.log.Warn("DATABASE_URL not set: using in-memory storage, data is lost on restart")
 		ob := memory.NewOutbox(notify.EncodeEvent)
@@ -115,9 +105,9 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 			merchants:   memory.NewMerchantRepo(),
 			apiKeys:     memory.NewAPIKeyRepo(),
 			creds:       memory.NewCredentialRepo(),
-			idempotency: memory.NewIdempotencyStore(),
-			outbox:      ob,
 			webhooks:    ob,
+			outbox:      ob,
+			idempotency: memory.NewIdempotencyStore(),
 		}, nil
 	}
 
@@ -125,7 +115,10 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ENCRYPTION_KEY: %w", err)
 	}
-	db, err := postgres.Open(ctx, a.cfg.DatabaseURL)
+	db, err := postgres.Open(ctx, a.cfg.DatabaseURL, postgres.PoolConfig{
+		MaxOpenConns: a.cfg.DBMaxOpenConns,
+		MaxIdleConns: a.cfg.DBMaxIdleConns,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -134,15 +127,16 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	a.db = db
-	outboxStore := postgres.NewOutboxStore(db)
+
+	ob := postgres.NewOutboxStore(db)
 	return &repositories{
 		payments:    postgres.NewPaymentRepo(db, notify.EncodeEvent),
 		merchants:   postgres.NewMerchantRepo(db),
 		apiKeys:     postgres.NewAPIKeyRepo(db),
 		creds:       postgres.NewCredentialRepo(db, cipher),
+		webhooks:    ob,
+		outbox:      ob,
 		idempotency: postgres.NewIdempotencyStore(db),
-		outbox:      outboxStore,
-		webhooks:    outboxStore,
 	}, nil
 }
 
@@ -175,9 +169,7 @@ func (a *App) Run(ctx context.Context) error {
 	defer cancel()
 
 	err := a.server.Shutdown(shutdownCtx)
-	// Let the dispatcher finish its current batch. Anything undelivered is
-	// safe in the outbox and goes out after the next start.
-	select {
+	select { // undelivered webhooks stay in the outbox for the next start
 	case <-dispatcherDone:
 	case <-shutdownCtx.Done():
 	}
@@ -189,9 +181,8 @@ func (a *App) Run(ctx context.Context) error {
 	return err
 }
 
-// housekeeping deletes expired Idempotency-Key records and old delivered
-// webhook messages every hour until ctx ends. It only keeps tables small;
-// correctness never depends on it.
+// housekeeping purges expired idempotency keys and old delivered webhooks
+// hourly. Correctness does not depend on it.
 func (a *App) housekeeping(ctx context.Context) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -201,10 +192,10 @@ func (a *App) housekeeping(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			a.purge(ctx, "idempotency keys", func() (int64, error) {
-				return a.idempotency.Purge(ctx, now.Add(-idempotency.KeyTTL))
+				return a.repos.idempotency.Purge(ctx, now.Add(-idempotency.KeyTTL))
 			})
 			a.purge(ctx, "delivered webhooks", func() (int64, error) {
-				return a.outbox.Purge(ctx, now.Add(-outbox.DeliveredRetention))
+				return a.repos.outbox.Purge(ctx, now.Add(-outbox.DeliveredRetention))
 			})
 		}
 	}
@@ -221,12 +212,10 @@ func (a *App) purge(ctx context.Context, what string, fn func() (int64, error)) 
 	}
 }
 
-// rateLimits builds the limiters from configuration. A rate of 0 leaves that
-// limiter nil, which disables it.
 func rateLimits(cfg config.Config) httpapi.RateLimits {
 	limiter := func(perMinute int) ratelimit.Limiter {
 		if perMinute == 0 {
-			return nil
+			return nil // disabled
 		}
 		return ratelimit.NewTokenBucket(perMinute, ratelimit.BurstFor(perMinute))
 	}

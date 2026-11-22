@@ -23,15 +23,8 @@ type webhookPayload struct {
 	} `json:"data"`
 }
 
-// ParseWebhook verifies a Xendit webhook by comparing the x-callback-token
-// header with the merchant's verification token.
-//
-// Handled events:
-//
-//	payment.succeeded / payment.failed   → paid / failed
-//	payment_method.expired               → expired
-//
-// Everything else is acknowledged and ignored.
+// ParseWebhook authenticates by the x-callback-token header. It handles
+// payment.* and payment_method.expired events and ignores the rest.
 func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential, req gateway.WebhookRequest) (*gateway.WebhookEvent, error) {
 	token := req.Headers.Get("x-callback-token")
 	expected := cred.Secret(SecretCallbackToken)
@@ -50,9 +43,7 @@ func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential,
 		event.ProviderRef = p.Data.PaymentRequestID
 		event.Status = mapStatus(p.Data.Status)
 		if event.Status == domain.StatusPaid {
-			if t, err := time.Parse(time.RFC3339, p.Data.Created); err == nil {
-				event.PaidAt = &t
-			}
+			event.PaidAt = gateway.ParseTime(time.RFC3339, p.Data.Created, time.UTC)
 		}
 	case p.Event == "payment_method.expired":
 		event.Status = domain.StatusExpired

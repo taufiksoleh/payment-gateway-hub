@@ -9,14 +9,14 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 )
 
-// Cipher encrypts credential secrets at rest. *secret.Cipher implements it.
+// Cipher is implemented by *secret.Cipher.
 type Cipher interface {
 	Encrypt(plaintext []byte) ([]byte, error)
 	Decrypt(ciphertext []byte) ([]byte, error)
 }
 
-// CredentialRepo implements usecase.CredentialRepository. Secrets are stored
-// as encrypted JSON so a database dump never exposes merchants' gateway keys.
+// CredentialRepo stores secrets as encrypted JSON, so a database dump does
+// not expose merchants' gateway keys.
 type CredentialRepo struct {
 	db     *sql.DB
 	cipher Cipher
@@ -61,17 +61,7 @@ func (r *CredentialRepo) List(ctx context.Context, merchantID string) ([]domain.
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []domain.GatewayCredential
-	for rows.Next() {
-		c, err := r.scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *c)
-	}
-	return out, rows.Err()
+	return collect(rows, r.scan)
 }
 
 func (r *CredentialRepo) Delete(ctx context.Context, merchantID string, p domain.Provider) error {
@@ -84,11 +74,6 @@ func (r *CredentialRepo) Delete(ctx context.Context, merchantID string, p domain
 		return domain.ErrNotFound
 	}
 	return nil
-}
-
-// scanner is satisfied by both *sql.Row and *sql.Rows.
-type scanner interface {
-	Scan(dest ...any) error
 }
 
 func (r *CredentialRepo) scan(s scanner) (*domain.GatewayCredential, error) {

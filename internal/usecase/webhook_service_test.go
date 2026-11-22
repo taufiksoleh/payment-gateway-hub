@@ -20,7 +20,7 @@ func TestWebhookService_ListValidatesInput(t *testing.T) {
 
 	for name, in := range map[string]usecase.ListWebhooksInput{
 		"unknown status": {Status: "lost"},
-		"limit too big":  {Limit: usecase.MaxWebhookPageSize + 1},
+		"limit too big":  {Limit: usecase.MaxPageSize + 1},
 		"negative limit": {Limit: -1},
 	} {
 		if _, err := svc.List(ctx, "mch_1", in); !errors.Is(err, domain.ErrInvalidInput) {

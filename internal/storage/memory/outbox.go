@@ -12,9 +12,8 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
-// Outbox keeps webhook messages in memory. Fine for tests and local
-// development; messages are lost on restart, which defeats the purpose of an
-// outbox in production (use the Postgres store there).
+// Outbox loses messages on restart, which defeats the point of an outbox;
+// it exists for tests and local development.
 type Outbox struct {
 	encode outbox.Encoder
 
@@ -31,7 +30,6 @@ type outboxEntry struct {
 	lastError     string
 }
 
-// NewOutbox builds an Outbox. encode turns payment events into payloads.
 func NewOutbox(encode outbox.Encoder) *Outbox {
 	return &Outbox{encode: encode, entries: map[string]*outboxEntry{}}
 }
@@ -41,7 +39,7 @@ var (
 	_ usecase.WebhookRepository = (*Outbox)(nil)
 )
 
-// Enqueue adds messages, due immediately.
+// Enqueue adds messages that are due immediately.
 func (o *Outbox) Enqueue(_ context.Context, msgs ...outbox.Message) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -135,13 +133,23 @@ func (o *Outbox) update(id string, fn func(*outboxEntry)) error {
 	return nil
 }
 
-// --- usecase.WebhookRepository: merchants inspecting their webhooks ---
+// The methods below implement usecase.WebhookRepository.
 
 func (o *Outbox) List(_ context.Context, merchantID string, f outbox.ListFilter) ([]outbox.Delivery, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	var all []outbox.Delivery
+	var cursor *outbox.Delivery
+	if f.Cursor != "" {
+		e, ok := o.entries[f.Cursor]
+		if !ok || e.msg.MerchantID != merchantID {
+			return nil, nil
+		}
+		d := e.delivery()
+		cursor = &d
+	}
+
+	var matches []outbox.Delivery
 	for _, e := range o.entries {
 		if e.msg.MerchantID != merchantID {
 			continue
@@ -150,28 +158,13 @@ func (o *Outbox) List(_ context.Context, merchantID string, f outbox.ListFilter)
 		if f.Status != "" && d.Status() != f.Status {
 			continue
 		}
-		d.Payload = nil // lists omit payloads; Find returns them
-		all = append(all, d)
+		d.Payload = nil // only Find returns payloads
+		matches = append(matches, d)
 	}
-	sort.Slice(all, func(i, j int) bool { return newerFirst(all[i].Message, all[j].Message) })
-
-	// Keyset pagination: skip everything up to and including the cursor.
-	if f.Cursor != "" {
-		cursor, ok := o.entries[f.Cursor]
-		if !ok || cursor.msg.MerchantID != merchantID {
-			return nil, nil
-		}
-		i := 0
-		for i < len(all) && !newerFirst(cursor.msg, all[i].Message) {
-			i++
-		}
-		all = all[i:]
-	}
-	if len(all) > f.Limit {
-		all = all[:f.Limit]
-	}
-	return all, nil
+	return pageNewestFirst(matches, deliveryKey, cursor, f.Limit), nil
 }
+
+func deliveryKey(d outbox.Delivery) (time.Time, string) { return d.CreatedAt, d.ID }
 
 func (o *Outbox) Find(_ context.Context, merchantID, id string) (*outbox.Delivery, error) {
 	o.mu.Lock()
@@ -211,7 +204,7 @@ func (o *Outbox) ReplayAllDead(_ context.Context, merchantID string, at time.Tim
 	return n, nil
 }
 
-// revive makes a dead entry pending again with a fresh set of attempts.
+// revive makes a dead entry pending again with fresh attempts.
 func (e *outboxEntry) revive(at time.Time) {
 	e.deadAt = time.Time{}
 	e.msg.Attempts = 0
@@ -236,12 +229,4 @@ func (e *outboxEntry) delivery() outbox.Delivery {
 		d.DeadAt = &t
 	}
 	return d
-}
-
-// newerFirst orders by created_at, then id, both descending.
-func newerFirst(a, b outbox.Message) bool {
-	if !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.After(b.CreatedAt)
-	}
-	return a.ID > b.ID
 }

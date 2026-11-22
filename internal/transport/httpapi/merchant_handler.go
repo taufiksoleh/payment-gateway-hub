@@ -17,8 +17,8 @@ type registerMerchantResponse struct {
 	ID            string    `json:"id"`
 	Name          string    `json:"name"`
 	WebhookURL    string    `json:"webhook_url,omitempty"`
-	APIKey        string    `json:"api_key"`        // shown only once
-	WebhookSecret string    `json:"webhook_secret"` // to verify X-Hub-Signature
+	APIKey        string    `json:"api_key"`
+	WebhookSecret string    `json:"webhook_secret"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -53,7 +53,7 @@ type saveGatewayRequest struct {
 type gatewayResponse struct {
 	Provider    string    `json:"provider"`
 	Environment string    `json:"environment"`
-	WebhookPath string    `json:"webhook_path"` // configure this in the provider dashboard
+	WebhookPath string    `json:"webhook_path"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -96,11 +96,7 @@ func (h *handlers) listGateways(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	out := make([]gatewayResponse, 0, len(creds))
-	for _, c := range creds {
-		out = append(out, toGatewayResponse(c))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"gateways": out})
+	writeJSON(w, http.StatusOK, map[string]any{"gateways": mapSlice(creds, toGatewayResponse)})
 }
 
 // DELETE /v1/gateways/{provider}

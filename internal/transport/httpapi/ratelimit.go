@@ -11,29 +11,20 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/ratelimit"
 )
 
-// RateLimits configures request limiting. A nil Limiter disables that limit.
-//
-//	PerIP        every /v1 request, keyed by client IP, checked before
-//	             authentication so floods of bad API keys never reach the DB
-//	PerMerchant  authenticated /v1 requests, keyed by merchant id
-//	Admin        admin endpoints, keyed by client IP (slows token guessing)
-//
-// Provider webhooks and /healthz are never limited: vendors share IPs across
-// all merchants, and throttling them would only delay payment updates.
+// RateLimits configures request limiting; a nil Limiter disables that limit.
+// Provider webhooks and /healthz are never limited, since vendors share IPs
+// across merchants.
 type RateLimits struct {
-	PerIP       ratelimit.Limiter
-	PerMerchant ratelimit.Limiter
-	Admin       ratelimit.Limiter
+	PerIP       ratelimit.Limiter // all /v1 requests, before authentication
+	PerMerchant ratelimit.Limiter // authenticated /v1 requests
+	Admin       ratelimit.Limiter // admin endpoints, per IP
 
-	// TrustProxy takes the client IP from X-Forwarded-For. Enable it only
-	// when exactly one reverse proxy (e.g. a load balancer) sits in front of
-	// the hub; otherwise clients could spoof the header to dodge limits.
+	// TrustProxy reads the client IP from X-Forwarded-For. Enable it only
+	// behind exactly one reverse proxy, or clients can spoof the header.
 	TrustProxy bool
 }
 
-// rateLimit refuses requests over the limit with 429. Every response on a
-// limited route carries the RateLimit-* headers so clients can pace
-// themselves before they hit the limit.
+// rateLimit sets the RateLimit-* headers and answers 429 over the limit.
 func rateLimit(l ratelimit.Limiter, scope string, key func(*http.Request) string) middleware {
 	return func(next http.Handler) http.Handler {
 		if l == nil {
@@ -49,10 +40,8 @@ func rateLimit(l ratelimit.Limiter, scope string, key func(*http.Request) string
 
 			if !d.Allowed {
 				h.Set("Retry-After", ceilSeconds(d.RetryAfter))
-				writeJSON(w, http.StatusTooManyRequests, errorBody{Error: errorDetail{
-					Code:    "rate_limited",
-					Message: "too many requests, retry after " + ceilSeconds(d.RetryAfter) + "s",
-				}})
+				writeProblem(w, http.StatusTooManyRequests, "rate_limited", "",
+					"too many requests, retry after "+ceilSeconds(d.RetryAfter)+"s")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -60,12 +49,11 @@ func rateLimit(l ratelimit.Limiter, scope string, key func(*http.Request) string
 	}
 }
 
-// clientIP returns the address rate limits are keyed by.
 func clientIP(trustProxy bool) func(*http.Request) string {
 	return func(r *http.Request) string {
 		if trustProxy {
-			// Our proxy appends the address it received the request from,
-			// so the last entry is the one the client cannot forge.
+			// The proxy appends the peer address, so the last entry is the
+			// one the client cannot forge.
 			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 				parts := strings.Split(xff, ",")
 				if ip := strings.TrimSpace(parts[len(parts)-1]); ip != "" {
@@ -85,8 +73,7 @@ func merchantKey(r *http.Request) string {
 	return merchantFrom(r.Context()).ID
 }
 
-// ceilSeconds renders a duration as whole seconds, rounded up, so a client
-// that waits that long is guaranteed to find a token.
+// ceilSeconds rounds up so a client that waits that long finds a token.
 func ceilSeconds(d time.Duration) string {
 	return strconv.Itoa(int(math.Ceil(d.Seconds())))
 }

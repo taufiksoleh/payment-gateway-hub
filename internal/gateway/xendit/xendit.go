@@ -1,28 +1,18 @@
-// Package xendit adapts the Xendit Payment Requests API to the
-// gateway.Gateway port.
+// Package xendit adapts the Xendit Payment Requests API
+// (https://developers.xendit.co/api-reference/#payment-requests).
 //
-// Docs: https://developers.xendit.co/api-reference/#payment-requests
+// Secrets: secret_key (Settings → API Keys, money-in write) and
+// callback_token (Settings → Webhooks → Verification token).
+// Webhook URL for "Payment Requests": https://<hub>/webhooks/xendit/<merchant_id>.
 //
-// Required secrets:
-//
-//	secret_key      Xendit dashboard → Settings → API Keys (needs Money-in write)
-//	callback_token  Xendit dashboard → Settings → Webhooks → Verification token
-//
-// Webhook: in Xendit dashboard → Settings → Webhooks, set the
-// "Payment Requests" URLs to https://<hub>/webhooks/xendit/<merchant_id>.
-//
-// Xendit uses one base URL for test and live mode; the secret key decides
-// which one you hit, so Environment is only informational here.
+// Xendit has one base URL; the secret key selects test or live mode.
 package xendit
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
@@ -35,23 +25,20 @@ const (
 	defaultBaseURL = "https://api.xendit.co"
 )
 
-// Options configures the adapter. Zero values use Xendit defaults.
 type Options struct {
 	HTTPClient *http.Client
-	BaseURL    string
+	BaseURL    string // override for tests
 }
 
-// Gateway talks to Xendit.
 type Gateway struct {
 	client  *http.Client
 	baseURL string
 }
 
-// New builds a Xendit adapter.
 func New(opts Options) *Gateway {
 	g := &Gateway{client: opts.HTTPClient, baseURL: opts.BaseURL}
 	if g.client == nil {
-		g.client = &http.Client{Timeout: 30 * time.Second}
+		g.client = gateway.DefaultHTTPClient()
 	}
 	if g.baseURL == "" {
 		g.baseURL = defaultBaseURL
@@ -59,8 +46,10 @@ func New(opts Options) *Gateway {
 	return g
 }
 
-var _ gateway.Gateway = (*Gateway)(nil)
-var _ gateway.Refunder = (*Gateway)(nil)
+var (
+	_ gateway.Gateway  = (*Gateway)(nil)
+	_ gateway.Refunder = (*Gateway)(nil)
+)
 
 func (g *Gateway) Provider() domain.Provider { return domain.ProviderXendit }
 
@@ -68,7 +57,6 @@ func (g *Gateway) ValidateCredentials(cred domain.GatewayCredential) error {
 	return gateway.RequireSecrets(cred, SecretSecretKey, SecretCallbackToken)
 }
 
-// CreatePayment calls POST /payment_requests.
 func (g *Gateway) CreatePayment(ctx context.Context, cred domain.GatewayCredential, req gateway.CreatePaymentRequest) (*gateway.CreatePaymentResult, error) {
 	body, err := buildPaymentRequest(req)
 	if err != nil {
@@ -86,7 +74,6 @@ func (g *Gateway) CreatePayment(ctx context.Context, cred domain.GatewayCredenti
 	}, nil
 }
 
-// GetStatus calls GET /payment_requests/{id}.
 func (g *Gateway) GetStatus(ctx context.Context, cred domain.GatewayCredential, ref gateway.PaymentRef) (*gateway.StatusResult, error) {
 	if ref.ProviderRef == "" {
 		return nil, domain.Invalid("provider_ref", "is required for xendit status checks")
@@ -99,8 +86,8 @@ func (g *Gateway) GetStatus(ctx context.Context, cred domain.GatewayCredential, 
 	return &gateway.StatusResult{ProviderRef: res.ID, Status: mapStatus(res.Status)}, nil
 }
 
-// Refund calls POST /refunds. Xendit supports API refunds for e-wallets and
-// QRIS; virtual accounts and retail outlets return an error from Xendit.
+// Refund works for e-wallets and QRIS; Xendit rejects virtual accounts and
+// retail outlets.
 func (g *Gateway) Refund(ctx context.Context, cred domain.GatewayCredential, req gateway.RefundRequest) (*gateway.RefundResult, error) {
 	body := refundRequest{
 		ReferenceID:      req.RefundID,
@@ -118,14 +105,11 @@ func (g *Gateway) Refund(ctx context.Context, cred domain.GatewayCredential, req
 }
 
 func (g *Gateway) call(ctx context.Context, cred domain.GatewayCredential, method, path, idempotencyKey string, in, out any) error {
-	var raw []byte
-	if in != nil {
-		var err error
-		if raw, err = json.Marshal(in); err != nil {
-			return fmt.Errorf("xendit: encode request: %w", err)
-		}
+	raw, err := gateway.EncodeJSON(in)
+	if err != nil {
+		return err
 	}
-	headers := map[string]string{"Authorization": basicAuth(cred.Secret(SecretSecretKey))}
+	headers := map[string]string{"Authorization": gateway.BasicAuth(cred.Secret(SecretSecretKey))}
 	if idempotencyKey != "" {
 		headers["idempotency-key"] = idempotencyKey
 	}
@@ -150,12 +134,6 @@ func (g *Gateway) call(ctx context.Context, cred domain.GatewayCredential, metho
 	return gateway.DecodeJSON(domain.ProviderXendit, resp.Body, out)
 }
 
-// basicAuth: Xendit uses the secret key as username and an empty password.
-func basicAuth(secretKey string) string {
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(secretKey+":"))
-}
-
-// mapStatus translates Xendit payment request / payment status.
 func mapStatus(s string) domain.Status {
 	switch s {
 	case "SUCCEEDED":
@@ -166,7 +144,7 @@ func mapStatus(s string) domain.Status {
 		return domain.StatusExpired
 	case "VOIDED", "CANCELED":
 		return domain.StatusCancelled
-	default: // PENDING, REQUIRES_ACTION, AWAITING_CAPTURE, ACTIVE, ...
+	default: // PENDING, REQUIRES_ACTION, AWAITING_CAPTURE, ...
 		return domain.StatusPending
 	}
 }

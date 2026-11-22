@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 )
@@ -29,7 +32,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError is the single place that maps domain errors to HTTP.
+// writeProblem writes the standard error body.
+func writeProblem(w http.ResponseWriter, status int, code, field, message string) {
+	writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Field: field, Message: message}})
+}
+
+// writeError maps domain errors to HTTP responses.
 func writeError(w http.ResponseWriter, err error) {
 	status, code := http.StatusInternalServerError, "internal_error"
 	msg := "internal server error"
@@ -37,16 +45,13 @@ func writeError(w http.ResponseWriter, err error) {
 	var verr *domain.ValidationError
 	switch {
 	case errors.As(err, &verr):
-		writeJSON(w, http.StatusUnprocessableEntity, errorBody{Error: errorDetail{
-			Code: "invalid_input", Message: verr.Message, Field: verr.Field,
-		}})
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_input", verr.Field, verr.Message)
 		return
 	case errors.Is(err, domain.ErrInvalidInput):
 		status, code, msg = http.StatusUnprocessableEntity, "invalid_input", err.Error()
 	case errors.Is(err, domain.ErrNotFound):
 		status, code, msg = http.StatusNotFound, "not_found", "resource not found"
 	case errors.Is(err, domain.ErrConcurrentModification):
-		// Retryable: providers re-send webhooks on non-2xx, clients may retry.
 		status, code, msg = http.StatusConflict, "concurrent_update", "payment was updated concurrently, retry the request"
 	case errors.Is(err, domain.ErrConflict):
 		status, code, msg = http.StatusConflict, "conflict", err.Error()
@@ -63,11 +68,10 @@ func writeError(w http.ResponseWriter, err error) {
 	default:
 		slog.Error("unhandled error", "error", err)
 	}
-	writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Message: msg}})
+	writeProblem(w, status, code, "", msg)
 }
 
-// decodeJSON reads a size-limited JSON body and rejects unknown fields, so
-// typos in client requests fail loudly instead of being ignored.
+// decodeJSON rejects unknown fields so client typos fail loudly.
 func decodeJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(io.LimitReader(r.Body, maxRequestBytes))
 	dec.DisallowUnknownFields()
@@ -75,4 +79,38 @@ func decodeJSON(r *http.Request, v any) error {
 		return fmt.Errorf("%w: request body: %w", domain.ErrInvalidInput, err)
 	}
 	return nil
+}
+
+// decodeOptionalJSON is decodeJSON for endpoints whose body may be empty.
+func decodeOptionalJSON(r *http.Request, v any) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	if err != nil {
+		return domain.Invalid("body", "cannot be read")
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return decodeJSON(r, v)
+}
+
+// queryInt parses an optional integer query parameter; absent is 0.
+func queryInt(q url.Values, name string) (int, error) {
+	s := q.Get(name)
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, domain.Invalid(name, "must be a number")
+	}
+	return n, nil
+}
+
+func mapSlice[T, U any](in []T, f func(T) U) []U {
+	out := make([]U, 0, len(in))
+	for _, v := range in {
+		out = append(out, f(v))
+	}
+	return out
 }

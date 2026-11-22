@@ -3,7 +3,6 @@ package httpapi
 import (
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -85,7 +84,7 @@ func (h *handlers) syncPayment(w http.ResponseWriter, r *http.Request) {
 }
 
 type refundRequest struct {
-	Amount int64  `json:"amount"` // omit or 0 for a full refund
+	Amount int64  `json:"amount"` // 0: full refund
 	Reason string `json:"reason"`
 }
 
@@ -130,9 +129,7 @@ type paymentListResponse struct {
 	NextCursor string        `json:"next_cursor,omitempty"`
 }
 
-// GET /v1/payments?status=paid&provider=midtrans&method=qris&order_id=...
-//
-//	&created_from=2026-11-01T00:00:00+07:00&created_to=...&limit=50&cursor=pay_...
+// GET /v1/payments?status=&provider=&method=&order_id=&created_from=&created_to=&limit=&cursor=
 func (h *handlers) listPayments(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := usecase.PaymentFilter{
@@ -152,11 +149,9 @@ func (h *handlers) listPayments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if s := q.Get("limit"); s != "" {
-		if f.Limit, err = strconv.Atoi(s); err != nil {
-			writeError(w, domain.Invalid("limit", "must be a number"))
-			return
-		}
+	if f.Limit, err = queryInt(q, "limit"); err != nil {
+		writeError(w, err)
+		return
 	}
 
 	page, err := h.payments.List(r.Context(), merchantFrom(r.Context()).ID, f)
@@ -164,11 +159,10 @@ func (h *handlers) listPayments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	out := paymentListResponse{Payments: make([]dto.Payment, 0, len(page.Payments)), NextCursor: page.NextCursor}
-	for _, p := range page.Payments {
-		out.Payments = append(out.Payments, dto.FromPayment(p))
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, paymentListResponse{
+		Payments:   mapSlice(page.Payments, dto.FromPayment),
+		NextCursor: page.NextCursor,
+	})
 }
 
 // queryTime parses an optional RFC 3339 query parameter.
@@ -176,7 +170,7 @@ func queryTime(value, field string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
-	// An unencoded "+" (as in +07:00) arrives as a space; accept it.
+	// An unencoded "+" in an offset arrives as a space.
 	t, err := time.Parse(time.RFC3339, strings.ReplaceAll(value, " ", "+"))
 	if err != nil {
 		return time.Time{}, domain.Invalid(field, "must be an RFC 3339 time, e.g. 2026-11-01T00:00:00+07:00")

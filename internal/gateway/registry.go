@@ -12,8 +12,7 @@ type Registry struct {
 	gateways map[domain.Provider]Gateway
 }
 
-// NewRegistry builds a Registry from adapters. A duplicate provider panics,
-// because that is a wiring bug found at startup.
+// NewRegistry panics on a duplicate provider: that is a wiring bug.
 func NewRegistry(gateways ...Gateway) *Registry {
 	r := &Registry{gateways: make(map[domain.Provider]Gateway, len(gateways))}
 	for _, g := range gateways {
@@ -25,7 +24,6 @@ func NewRegistry(gateways ...Gateway) *Registry {
 	return r
 }
 
-// Get returns the adapter for a provider.
 func (r *Registry) Get(p domain.Provider) (Gateway, error) {
 	g, ok := r.gateways[p]
 	if !ok {
@@ -34,7 +32,7 @@ func (r *Registry) Get(p domain.Provider) (Gateway, error) {
 	return g, nil
 }
 
-// Providers lists registered providers in a stable order.
+// Providers lists registered providers in sorted order.
 func (r *Registry) Providers() []domain.Provider {
 	out := make([]domain.Provider, 0, len(r.gateways))
 	for p := range r.gateways {

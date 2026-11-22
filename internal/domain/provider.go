@@ -1,6 +1,6 @@
 package domain
 
-// Provider identifies a payment gateway vendor.
+// Provider is a payment gateway vendor.
 type Provider string
 
 const (
@@ -9,7 +9,6 @@ const (
 	ProviderDOKU     Provider = "doku"
 )
 
-// Environment selects the vendor's sandbox or production endpoints.
 type Environment string
 
 const (
@@ -21,7 +20,6 @@ func (e Environment) Valid() bool {
 	return e == EnvironmentSandbox || e == EnvironmentProduction
 }
 
-// Method is the family of payment instrument the customer uses.
 type Method string
 
 const (
@@ -40,12 +38,12 @@ func (m Method) Valid() bool {
 	return false
 }
 
-// Channel is the concrete bank, wallet or outlet inside a Method.
-// Which channels a provider supports is decided by its adapter.
+// Channel is the bank, wallet or outlet within a Method. Each adapter decides
+// which channels it supports.
 type Channel string
 
 const (
-	// Virtual account banks.
+	// Virtual account banks
 	ChannelBCA     Channel = "bca"
 	ChannelBNI     Channel = "bni"
 	ChannelBRI     Channel = "bri"
@@ -54,20 +52,18 @@ const (
 	ChannelCIMB    Channel = "cimb"
 	ChannelBSI     Channel = "bsi"
 
-	// QRIS has a single channel.
 	ChannelQRIS Channel = "qris"
 
-	// E-wallets.
+	// E-wallets
 	ChannelGoPay     Channel = "gopay"
 	ChannelOVO       Channel = "ovo"
 	ChannelDANA      Channel = "dana"
 	ChannelShopeePay Channel = "shopeepay"
 	ChannelLinkAja   Channel = "linkaja"
 
-	// Retail outlets.
+	// Retail outlets
 	ChannelAlfamart  Channel = "alfamart"
 	ChannelIndomaret Channel = "indomaret"
 
-	// Cards (hosted page only).
 	ChannelCard Channel = "card"
 )

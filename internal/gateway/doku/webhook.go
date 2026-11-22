@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
@@ -20,8 +21,8 @@ type notification struct {
 	} `json:"transaction"`
 }
 
-// ParseWebhook verifies a DOKU notification. DOKU signs it like a request,
-// with Request-Target set to the path of our notification endpoint.
+// ParseWebhook verifies the notification the same way DOKU signs requests,
+// with Request-Target set to the hub's notification path.
 func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential, req gateway.WebhookRequest) (*gateway.WebhookEvent, error) {
 	clientID := req.Headers.Get("Client-Id")
 	if clientID != cred.Secret(SecretClientID) {
@@ -49,7 +50,7 @@ func (g *Gateway) ParseWebhook(_ context.Context, cred domain.GatewayCredential,
 		Status:    mapStatus(n.Transaction.Status),
 	}
 	if event.Status == domain.StatusPaid {
-		event.PaidAt = parseRFC3339(n.Transaction.Date)
+		event.PaidAt = gateway.ParseTime(time.RFC3339, n.Transaction.Date, time.UTC)
 	}
 	return event, nil
 }

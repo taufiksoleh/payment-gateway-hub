@@ -3,19 +3,57 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 )
 
-// maxResponseBytes stops a misbehaving provider from exhausting memory.
 const maxResponseBytes = 1 << 20
 
-// ProviderError is returned when a provider answers with an error.
-// It matches domain.ErrProvider via errors.Is.
+// WIB is Western Indonesia Time (UTC+7), used in Midtrans and DOKU timestamps.
+var WIB = time.FixedZone("WIB", 7*60*60)
+
+// DefaultHTTPClient is used by adapters constructed without a client.
+func DefaultHTTPClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second}
+}
+
+// Endpoints are a provider's base URLs per environment.
+type Endpoints struct {
+	Sandbox    string
+	Production string
+}
+
+// Or fills empty URLs from defaults.
+func (e Endpoints) Or(defaults Endpoints) Endpoints {
+	if e.Sandbox == "" {
+		e.Sandbox = defaults.Sandbox
+	}
+	if e.Production == "" {
+		e.Production = defaults.Production
+	}
+	return e
+}
+
+func (e Endpoints) For(env domain.Environment) string {
+	if env == domain.EnvironmentProduction {
+		return e.Production
+	}
+	return e.Sandbox
+}
+
+// BasicAuth builds an Authorization value with key as the user name and an
+// empty password, the scheme Midtrans and Xendit use.
+func BasicAuth(key string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(key+":"))
+}
+
+// ProviderError is a provider's error answer. It matches domain.ErrProvider.
 type ProviderError struct {
 	Provider   domain.Provider
 	StatusCode int
@@ -28,23 +66,21 @@ func (e *ProviderError) Error() string {
 
 func (e *ProviderError) Is(target error) bool { return target == domain.ErrProvider }
 
-// HTTPRequest describes one JSON call to a provider.
 type HTTPRequest struct {
 	Method  string
 	URL     string
 	Headers map[string]string
-	Body    []byte // already-encoded JSON, or nil
+	Body    []byte // encoded JSON or nil
 }
 
-// HTTPResponse is the raw answer.
 type HTTPResponse struct {
 	StatusCode int
 	Body       []byte
 }
 
-// Do sends req and returns the raw response. It only fails on transport
-// errors; callers decide which status codes are errors because providers
-// disagree (Midtrans returns HTTP 200 with an error status_code in the body).
+// Do sends req and returns the raw response. It fails only on transport
+// errors: adapters decide what counts as an error response, since providers
+// disagree (Midtrans reports errors inside HTTP 200 bodies).
 func Do(ctx context.Context, client *http.Client, req HTTPRequest) (*HTTPResponse, error) {
 	var body io.Reader
 	if req.Body != nil {
@@ -75,16 +111,27 @@ func Do(ctx context.Context, client *http.Client, req HTTPRequest) (*HTTPRespons
 	return &HTTPResponse{StatusCode: resp.StatusCode, Body: raw}, nil
 }
 
-// DecodeJSON unmarshals a provider response and wraps failures as provider
-// errors.
+// EncodeJSON marshals a request body; a nil body encodes to nil.
+func EncodeJSON(v any) ([]byte, error) {
+	if v == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode request: %w", err)
+	}
+	return b, nil
+}
+
+// DecodeJSON reports malformed provider responses as provider errors.
 func DecodeJSON(p domain.Provider, raw []byte, out any) error {
 	if err := json.Unmarshal(raw, out); err != nil {
-		return &ProviderError{Provider: p, StatusCode: 0, Message: "invalid JSON response: " + err.Error()}
+		return &ProviderError{Provider: p, Message: "invalid JSON response: " + err.Error()}
 	}
 	return nil
 }
 
-// RequireSecrets returns a validation error for the first missing key.
+// RequireSecrets validates the environment and that each key is present.
 func RequireSecrets(cred domain.GatewayCredential, keys ...string) error {
 	if !cred.Environment.Valid() {
 		return domain.Invalid("environment", "must be sandbox or production")
@@ -97,8 +144,15 @@ func RequireSecrets(cred domain.GatewayCredential, keys ...string) error {
 	return nil
 }
 
-// UnsupportedChannel builds the standard error for a channel an adapter
-// does not handle.
 func UnsupportedChannel(p domain.Provider, m domain.Method, c domain.Channel) error {
 	return fmt.Errorf("%w: %s does not support %s/%s", domain.ErrUnsupported, p, m, c)
+}
+
+// ParseTime returns nil for empty or malformed values.
+func ParseTime(layout, value string, loc *time.Location) *time.Time {
+	t, err := time.ParseInLocation(layout, value, loc)
+	if err != nil {
+		return nil
+	}
+	return &t
 }

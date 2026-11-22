@@ -31,7 +31,7 @@ func TestRepositories(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	db, err := postgres.Open(ctx, url)
+	db, err := postgres.Open(ctx, url, postgres.PoolConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,4 +187,43 @@ func TestRepositories(t *testing.T) {
 		}
 		storagetest.RunAPIKeyContract(t, postgres.NewAPIKeyRepo(db), mm.ID, strings.ReplaceAll(suffix, ".", ""))
 	})
+}
+
+// Several instances starting at once must not race on migrations.
+func TestMigrate_ConcurrentInstances(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	admin, err := postgres.Open(ctx, url, postgres.PoolConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+
+	name := "hub_migrate_" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "")
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.ExecContext(ctx, "DROP DATABASE "+name+" WITH (FORCE)") }()
+
+	fresh := strings.Replace(url, "/hub?", "/"+name+"?", 1)
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() {
+			db, err := postgres.Open(ctx, fresh, postgres.PoolConfig{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer db.Close()
+			errs <- postgres.Migrate(ctx, db, migrations.FS)
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("instance %d: %v", i, err)
+		}
+	}
 }

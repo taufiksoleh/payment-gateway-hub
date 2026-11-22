@@ -1,8 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
-	"io"
 	"net/http"
 	"time"
 
@@ -10,7 +8,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
-// apiKeyResponse never includes the key itself, only a hint.
+// apiKeyResponse never includes the key, only a hint.
 type apiKeyResponse struct {
 	ID         string     `json:"id"`
 	Hint       string     `json:"hint"` // "pgh_…a1b2"
@@ -25,7 +23,7 @@ type apiKeyResponse struct {
 func toAPIKeyResponse(k domain.APIKey, currentID string, now time.Time) apiKeyResponse {
 	hint := "pgh_…" + k.Hint
 	if k.Hint == "" {
-		hint = "pgh_…" // keys created before hints were stored
+		hint = "pgh_…" // keys migrated before hints existed
 	}
 	return apiKeyResponse{
 		ID:         k.ID,
@@ -39,7 +37,7 @@ func toAPIKeyResponse(k domain.APIKey, currentID string, now time.Time) apiKeyRe
 	}
 }
 
-// issuedKeyResponse carries the raw key, shown exactly once.
+// issuedKeyResponse is the only response that carries a raw key.
 type issuedKeyResponse struct {
 	APIKey string         `json:"api_key"`
 	Key    apiKeyResponse `json:"key"`
@@ -53,17 +51,13 @@ func (h *handlers) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now, current := time.Now(), apiKeyIDFrom(r.Context())
-	out := make([]apiKeyResponse, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, toAPIKeyResponse(k, current, now))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"api_keys": out})
+	writeJSON(w, http.StatusOK, map[string]any{"api_keys": mapSlice(keys, func(k domain.APIKey) apiKeyResponse {
+		return toAPIKeyResponse(k, current, now)
+	})})
 }
 
 type rotateRequest struct {
-	// Seconds the previous keys keep working. Omit for the 24h default;
-	// 0 cuts them off immediately.
-	GracePeriodSeconds *int64 `json:"grace_period_seconds"`
+	GracePeriodSeconds *int64 `json:"grace_period_seconds"` // nil: default; 0: immediately
 }
 
 type rotateResponse struct {
@@ -107,7 +101,7 @@ func (h *handlers) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type issueKeyRequest struct {
-	RevokeExisting bool `json:"revoke_existing"` // use when a key leaked
+	RevokeExisting bool `json:"revoke_existing"`
 }
 
 type issueKeyResponse struct {
@@ -134,17 +128,4 @@ func (h *handlers) issueAPIKey(w http.ResponseWriter, r *http.Request) {
 		},
 		Revoked: revoked,
 	})
-}
-
-// decodeOptionalJSON is decodeJSON for endpoints whose body may be empty.
-func decodeOptionalJSON(r *http.Request, v any) error {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
-	if err != nil {
-		return domain.Invalid("body", "cannot be read")
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		return nil
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return decodeJSON(r, v)
 }

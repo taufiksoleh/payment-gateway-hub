@@ -9,13 +9,11 @@ import (
 
 const timestampLayout = "2006-01-02T15:04:05Z"
 
-// Sign builds DOKU's "Signature" header value.
-//
-//	component = "Client-Id:{id}\nRequest-Id:{rid}\nRequest-Timestamp:{ts}\nRequest-Target:{path}"
-//	            + "\nDigest:{base64(sha256(body))}"   (only when there is a body)
-//	signature = "HMACSHA256=" + base64(HMAC-SHA256(secretKey, component))
-//
-// The same algorithm signs requests to DOKU and DOKU's notifications to us.
+// Sign builds DOKU's Signature header: HMACSHA256=base64(HMAC-SHA256(secret,
+// component)), where component joins Client-Id, Request-Id,
+// Request-Timestamp, Request-Target and, when there is a body, Digest
+// (base64 sha256 of the body) as "Name:value" lines. DOKU signs its
+// notifications the same way.
 func Sign(secretKey, clientID, requestID, timestamp, target string, body []byte) string {
 	lines := []string{
 		"Client-Id:" + clientID,

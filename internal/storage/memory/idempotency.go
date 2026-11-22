@@ -8,7 +8,6 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
 )
 
-// IdempotencyStore keeps idempotency records in a map.
 type IdempotencyStore struct {
 	mu      sync.Mutex
 	records map[idemKey]idempotency.Record
@@ -73,7 +72,7 @@ func (s *IdempotencyStore) Purge(_ context.Context, before time.Time) (int64, er
 	return n, nil
 }
 
-// reclaimable mirrors the WHERE clause of the Postgres Claim.
+// reclaimable matches the WHERE clause of the Postgres Claim.
 func reclaimable(rec idempotency.Record, r idempotency.Reclaim) bool {
 	return (rec.InProgress() && rec.CreatedAt.Before(r.AbandonedBefore)) || rec.CreatedAt.Before(r.ExpiredBefore)
 }

@@ -29,7 +29,8 @@ never the other way around.
 | Composition | `internal/app`, `cmd/hub` | everything | — |
 
 A quick self-check: `go list -deps ./internal/usecase | grep payment-gateway-hub`
-should only show `domain`, `gateway` (the port package), and `platform/id`.
+should only show `domain`, the `gateway` and `outbox` port packages, and
+`platform/id`.
 
 ## SOLID in this codebase
 
@@ -131,6 +132,9 @@ notify.Dispatcher (every second)        claim due rows → sign → POST → del
   `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` with a 5-minute
   lease. If a dispatcher dies mid-batch, its messages become claimable again
   when the lease expires.
+- **Concurrent delivery.** Each batch is delivered with up to 8 requests
+  in flight, so a slow merchant endpoint (10s timeout) doesn't hold up other
+  merchants' webhooks.
 - **At-least-once delivery** with exponential backoff (10s doubling to a 1h
   cap, 12 attempts), then a dead-letter state. The merchant's URL and secret
   are read at delivery time, so retries follow configuration changes.
@@ -228,6 +232,19 @@ admin:     perIP → perAdminIP → admin token → handler
 **Errors are kinds, not HTTP codes.** The domain defines sentinel errors
 (`ErrNotFound`, `ErrInvalidInput`, `ErrProvider`, and so on).
 `httpapi/respond.go` is the single place that maps them to status codes.
+
+## Scaling out
+
+The hub is stateless apart from PostgreSQL, so you can run several instances
+behind a load balancer:
+
+| Concern | How it's handled |
+|---|---|
+| Migrations | `postgres.Migrate` holds a `pg_advisory_lock`. Instances starting together wait for it and then find nothing left to apply. |
+| Webhook delivery | Every instance runs a dispatcher. `FOR UPDATE SKIP LOCKED` plus a lease hands each message to one of them. |
+| Connections | Set `DB_MAX_OPEN_CONNS` and `DB_MAX_IDLE_CONNS` per instance. Keep instances × max open below PostgreSQL's `max_connections`. |
+| Payment updates | Optimistic locking and idempotency keys live in the database, so they hold across instances. |
+| Rate limits | Buckets are per process. With N instances each key gets N times the limit, unless `ratelimit.Limiter` is backed by a shared store. |
 
 ## Request flows
 

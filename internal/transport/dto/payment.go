@@ -1,5 +1,5 @@
-// Package dto defines the public JSON shapes of the hub. They are shared by
-// the REST API and outbound merchant webhooks so both always look the same.
+// Package dto holds the JSON shapes shared by the REST API and outbound
+// webhooks, so both render payments identically.
 package dto
 
 import (
@@ -8,7 +8,6 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 )
 
-// Payment is the public representation of domain.Payment.
 type Payment struct {
 	ID             string     `json:"id"`
 	OrderID        string     `json:"order_id"`
@@ -31,14 +30,12 @@ type Payment struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
-// Customer is who pays.
 type Customer struct {
 	Name  string `json:"name,omitempty"`
 	Email string `json:"email,omitempty"`
 	Phone string `json:"phone,omitempty"`
 }
 
-// Action tells the customer how to pay.
 type Action struct {
 	VirtualAccountNumber string `json:"virtual_account_number,omitempty"`
 	QRString             string `json:"qr_string,omitempty"`
@@ -48,7 +45,6 @@ type Action struct {
 	PaymentCode          string `json:"payment_code,omitempty"`
 }
 
-// FromPayment converts a domain payment.
 func FromPayment(p domain.Payment) Payment {
 	out := Payment{
 		ID:             p.ID,
@@ -80,10 +76,10 @@ func FromPayment(p domain.Payment) Payment {
 	return out
 }
 
-// Event is the body of an outbound merchant webhook.
+// Event is the body of an outbound webhook.
 type Event struct {
 	ID        string    `json:"id"`
-	Type      string    `json:"type"` // "payment.<status>", e.g. "payment.paid"
+	Type      string    `json:"type"`
 	CreatedAt time.Time `json:"created_at"`
 	Data      Payment   `json:"data"`
 }
