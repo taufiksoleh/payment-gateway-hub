@@ -1,5 +1,7 @@
 # payment-gateway-hub
 
+[![CI](https://github.com/taufiksoleh/payment-gateway-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/taufiksoleh/payment-gateway-hub/actions/workflows/ci.yml)
+
 One API for Indonesian payment gateways. Merchants sign up with the vendors
 they want (**Midtrans**, **Xendit**, **DOKU**), give the hub their keys, and then
 create payments, receive status updates and refund through a single,
