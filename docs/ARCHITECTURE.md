@@ -89,6 +89,24 @@ We use optimistic rather than pessimistic locking (`SELECT ... FOR UPDATE`)
 because vendor calls happen outside any transaction, conflicts are rare, and
 it keeps repositories free of transaction plumbing.
 
+**Refunds reserve before they call the vendor.** Optimistic locking alone
+protects the database, not the vendor: two refunds could both pass
+validation, both refund at the vendor, and only then collide. So a refund
+has three steps, each saved under the lock:
+
+```
+ReserveRefund   pending_refund_amount += amount   (before the vendor call)
+vendor.Refund
+CompleteRefund  pending → refunded_amount          (vendor accepted)
+ReleaseRefund   pending -= amount                  (vendor rejected)
+```
+
+`RefundableAmount()` subtracts reservations. A second refund that starts
+while the first is at the vendor loses the lock at the reserve step, reloads,
+sees nothing left to refund, and fails with 422 before it reaches the vendor.
+Steps 2 and 3 use `context.WithoutCancel`, so a client disconnecting
+mid-refund cannot leave a reservation behind.
+
 **Domain types have no JSON tags.** Wire formats live in `transport/dto`
 (public API), in each vendor package (vendor API), and in `postgres`
 (storage). Renaming a JSON field never touches business code.
@@ -134,7 +152,7 @@ POST /webhooks/midtrans/mch_123
 | Level | What | How |
 |---|---|---|
 | Domain | Validation, state machine, refunds | Plain table tests |
-| Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
+| Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races, a second refund fired while the first is at the vendor | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
 | HTTP | Routing, auth, error mapping, full flow | `httptest` + real use cases + memory repos |
 | Storage | SQL correctness, migrations | Real PostgreSQL, gated by `TEST_DATABASE_URL` |

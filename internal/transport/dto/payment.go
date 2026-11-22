@@ -19,6 +19,7 @@ type Payment struct {
 	Amount         int64      `json:"amount"`
 	Currency       string     `json:"currency"`
 	RefundedAmount int64      `json:"refunded_amount"`
+	PendingRefund  int64      `json:"pending_refund_amount,omitempty"`
 	Status         string     `json:"status"`
 	FailureReason  string     `json:"failure_reason,omitempty"`
 	Description    string     `json:"description,omitempty"`
@@ -59,6 +60,7 @@ func FromPayment(p domain.Payment) Payment {
 		Amount:         p.Amount,
 		Currency:       p.Currency,
 		RefundedAmount: p.RefundedAmount,
+		PendingRefund:  p.PendingRefundAmount,
 		Status:         string(p.Status),
 		FailureReason:  p.FailureReason,
 		Description:    p.Description,

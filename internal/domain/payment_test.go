@@ -90,27 +90,68 @@ func TestPayment_TransitionTo(t *testing.T) {
 func TestPayment_Refund(t *testing.T) {
 	p, _ := domain.NewPayment(validParams(), now)
 
-	if err := p.ValidateRefund(100); !errors.Is(err, domain.ErrInvalidTransition) {
+	if err := p.ReserveRefund(100, now); !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Fatalf("refund of pending payment: got %v", err)
 	}
 
 	_, _ = p.TransitionTo(domain.StatusPaid, now)
 
-	if err := p.ApplyRefund(4000, now); err != nil {
+	// Partial refund: reserve, then complete.
+	if err := p.ReserveRefund(4000, now); err != nil {
 		t.Fatal(err)
 	}
-	if p.Status != domain.StatusPartiallyRefunded || p.RefundableAmount() != 6000 {
-		t.Fatalf("after partial: status=%s refundable=%d", p.Status, p.RefundableAmount())
+	if p.RefundableAmount() != 6000 || p.Status != domain.StatusPaid {
+		t.Fatalf("after reserve: refundable=%d status=%s", p.RefundableAmount(), p.Status)
+	}
+	if err := p.CompleteRefund(4000, now); err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != domain.StatusPartiallyRefunded || p.RefundedAmount != 4000 || p.PendingRefundAmount != 0 {
+		t.Fatalf("after complete: %+v", p)
 	}
 
-	if err := p.ApplyRefund(7000, now); !errors.Is(err, domain.ErrInvalidInput) {
-		t.Fatalf("over-refund: got %v, want ErrInvalidInput", err)
+	// A reservation blocks a second refund of the same money.
+	if err := p.ReserveRefund(6000, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ReserveRefund(1, now); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("over-reserve: got %v, want ErrInvalidInput", err)
 	}
 
-	if err := p.ApplyRefund(6000, now); err != nil {
+	// Provider rejected it: the money is refundable again.
+	if err := p.ReleaseRefund(6000, now); err != nil {
+		t.Fatal(err)
+	}
+	if p.RefundableAmount() != 6000 {
+		t.Fatalf("after release: refundable=%d", p.RefundableAmount())
+	}
+
+	// Full remaining refund.
+	_ = p.ReserveRefund(6000, now)
+	if err := p.CompleteRefund(6000, now); err != nil {
 		t.Fatal(err)
 	}
 	if p.Status != domain.StatusRefunded || p.RefundedAmount != 10000 {
 		t.Fatalf("after full: status=%s refunded=%d", p.Status, p.RefundedAmount)
+	}
+
+	// Completing something that was never reserved is a bug, not a refund.
+	if err := p.CompleteRefund(1, now); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("complete without reservation: got %v", err)
+	}
+}
+
+func TestPayment_CompleteRefundAfterProviderWebhook(t *testing.T) {
+	p, _ := domain.NewPayment(validParams(), now)
+	_, _ = p.TransitionTo(domain.StatusPaid, now)
+	_ = p.ReserveRefund(10000, now)
+
+	// The provider's "refunded" webhook can arrive before our own call returns.
+	_, _ = p.TransitionTo(domain.StatusRefunded, now)
+	if err := p.CompleteRefund(10000, now); err != nil {
+		t.Fatal(err)
+	}
+	if p.RefundedAmount != 10000 || p.PendingRefundAmount != 0 || p.Status != domain.StatusRefunded {
+		t.Fatalf("got %+v", p)
 	}
 }

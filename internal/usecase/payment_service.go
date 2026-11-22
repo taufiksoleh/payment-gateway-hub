@@ -183,6 +183,18 @@ type RefundInput struct {
 }
 
 // Refund returns money to the customer, if the provider supports it.
+//
+// To make double refunds impossible, the amount is first reserved on the
+// payment and saved under the optimistic lock, and only then sent to the
+// provider:
+//
+//  1. reserve   a concurrent refund now sees less refundable money
+//  2. provider  the actual refund
+//  3. complete  (provider accepted) or release (provider rejected)
+//
+// If two refunds race, the second one loses the lock at step 1, reloads,
+// sees the reservation and fails validation, so it never reaches the
+// provider.
 func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID string, in RefundInput) (*domain.Payment, error) {
 	p, err := s.Get(ctx, merchantID, paymentID)
 	if err != nil {
@@ -204,6 +216,18 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		return nil, fmt.Errorf("%w: %s refunds must be done in the provider dashboard", domain.ErrUnsupported, p.Provider)
 	}
 
+	// 1. Reserve.
+	if _, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+		return true, p.ReserveRefund(in.Amount, s.now())
+	}); err != nil {
+		return nil, err
+	}
+
+	// From here on the reservation must be settled even if the client
+	// disconnects, so the remaining steps ignore request cancellation.
+	ctx = context.WithoutCancel(ctx)
+
+	// 2. Provider.
 	_, err = refunder.Refund(ctx, *cred, gateway.RefundRequest{
 		RefundID: id.New("rfd"),
 		Ref:      gateway.PaymentRef{PaymentID: p.ID, ProviderRef: p.ProviderRef},
@@ -211,14 +235,22 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		Reason:   in.Reason,
 	})
 	if err != nil {
+		// 3b. Release, so the money can be refunded again later.
+		if _, rerr := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+			return true, p.ReleaseRefund(in.Amount, s.now())
+		}); rerr != nil {
+			s.log.ErrorContext(ctx, "refund failed and reservation could not be released",
+				"payment_id", p.ID, "amount", in.Amount, "error", rerr)
+		}
 		return nil, fmt.Errorf("refund at %s: %w", p.Provider, err)
 	}
 
-	_, err = s.update(ctx, p, func(p *domain.Payment) (bool, error) {
-		return true, p.ApplyRefund(in.Amount, s.now())
-	})
-	if err != nil {
-		// The provider already returned the money; flag it for reconciliation.
+	// 3a. Complete.
+	if _, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+		return true, p.CompleteRefund(in.Amount, s.now())
+	}); err != nil {
+		// The money is back with the customer and stays reserved, so it
+		// cannot be refunded twice; flag it for reconciliation.
 		s.log.ErrorContext(ctx, "refund accepted by provider but not recorded",
 			"payment_id", p.ID, "amount", in.Amount, "error", err)
 		return nil, err

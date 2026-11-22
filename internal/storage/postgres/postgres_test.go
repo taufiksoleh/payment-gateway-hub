@@ -83,6 +83,7 @@ func TestRepositories(t *testing.T) {
 	stale, _ := payments.FindByID(ctx, p.ID)
 
 	_, _ = p.TransitionTo(domain.StatusPaid, now)
+	_ = p.ReserveRefund(300, now)
 	if err := payments.Update(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +105,7 @@ func TestRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != domain.StatusPaid || got.PaidAt == nil || got.Action.QRString != "000201..." || got.Version != 2 {
+	if got.Status != domain.StatusPaid || got.PaidAt == nil || got.Action.QRString != "000201..." || got.Version != 2 || got.PendingRefundAmount != 300 {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 }

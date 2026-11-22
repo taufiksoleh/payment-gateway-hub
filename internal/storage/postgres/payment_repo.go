@@ -31,7 +31,7 @@ type actionJSON struct {
 const paymentColumns = `id, merchant_id, order_id, provider, provider_ref, method, channel,
 	amount, currency, refunded_amount, status, failure_reason, description,
 	customer_name, customer_email, customer_phone, action,
-	expires_at, paid_at, created_at, updated_at, version`
+	expires_at, paid_at, created_at, updated_at, version, pending_refund_amount`
 
 func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 	action, err := json.Marshal(actionJSON(p.Action))
@@ -39,11 +39,11 @@ func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 		return err
 	}
 	_, err = r.db.ExecContext(ctx, `INSERT INTO payments (`+paymentColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
 		p.ID, p.MerchantID, p.OrderID, p.Provider, p.ProviderRef, p.Method, p.Channel,
 		p.Amount, p.Currency, p.RefundedAmount, p.Status, p.FailureReason, p.Description,
 		p.Customer.Name, p.Customer.Email, p.Customer.Phone, action,
-		nullTime(p.ExpiresAt), p.PaidAt, p.CreatedAt, p.UpdatedAt, p.Version,
+		nullTime(p.ExpiresAt), p.PaidAt, p.CreatedAt, p.UpdatedAt, p.Version, p.PendingRefundAmount,
 	)
 	return mapError(err)
 }
@@ -60,10 +60,10 @@ func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 	res, err := r.db.ExecContext(ctx, `UPDATE payments SET
 			provider_ref = $3, refunded_amount = $4, status = $5, failure_reason = $6,
 			action = $7, expires_at = $8, paid_at = $9, updated_at = $10,
-			version = version + 1
+			pending_refund_amount = $11, version = version + 1
 		WHERE id = $1 AND version = $2`,
 		p.ID, p.Version, p.ProviderRef, p.RefundedAmount, p.Status, p.FailureReason,
-		action, nullTime(p.ExpiresAt), p.PaidAt, p.UpdatedAt,
+		action, nullTime(p.ExpiresAt), p.PaidAt, p.UpdatedAt, p.PendingRefundAmount,
 	)
 	if err != nil {
 		return mapError(err)
@@ -108,7 +108,7 @@ func scanPayment(row *sql.Row) (*domain.Payment, error) {
 		&p.ID, &p.MerchantID, &p.OrderID, &p.Provider, &p.ProviderRef, &p.Method, &p.Channel,
 		&p.Amount, &p.Currency, &p.RefundedAmount, &p.Status, &p.FailureReason, &p.Description,
 		&p.Customer.Name, &p.Customer.Email, &p.Customer.Phone, &action,
-		&expiresAt, &paidAt, &p.CreatedAt, &p.UpdatedAt, &p.Version,
+		&expiresAt, &paidAt, &p.CreatedAt, &p.UpdatedAt, &p.Version, &p.PendingRefundAmount,
 	)
 	if err != nil {
 		return nil, mapError(err)

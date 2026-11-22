@@ -25,6 +25,7 @@ merchant's own vendor account.
 - Signed outbound webhooks to merchants (`X-Hub-Signature`), with retries
 - Idempotent payment creation per `order_id`
 - Optimistic locking on payments: concurrent webhooks, syncs and refunds never overwrite each other
+- Double-refund protection: the refund amount is reserved before the vendor is called
 - Plain Go: standard library router, `database/sql`, `log/slog`. One external dependency (pgx)
 
 ## Supported channels
@@ -181,5 +182,7 @@ This is a solid foundation, not yet production-certified. Before going live:
 - **Verify each adapter against the vendor sandbox.** The request and response shapes follow vendor documentation and are covered by tests against recorded-style responses. They have not yet been run against live sandbox accounts.
 - **Merchant webhook delivery** is in-process with retries. Deliveries in flight are lost if the process crashes. Use a transactional outbox table for guaranteed delivery.
 - **Xendit refunds** are asynchronous on Xendit's side. The hub marks a refund done once Xendit accepts it.
+- **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
+- **Client retries:** the refund endpoint has no `Idempotency-Key` yet. A client that retries after a timeout can refund again, up to the amount still refundable. Concurrent requests for the same money are already blocked. Two simultaneous `POST /v1/payments` with the same `order_id` can still both reach the vendor before the database rejects the second one.
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
 - **Not yet built:** listing payments, rate limiting, API key rotation, metrics.

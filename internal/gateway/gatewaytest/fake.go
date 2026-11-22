@@ -18,6 +18,11 @@ type Fake struct {
 
 	CreateErr error
 	StatusRes *gateway.StatusResult
+	RefundErr error
+
+	// OnRefund, if set, runs at the start of Refund (outside the lock),
+	// letting tests act while a refund is "in flight" at the provider.
+	OnRefund func()
 
 	mu      sync.Mutex
 	Creates []gateway.CreatePaymentRequest
@@ -72,10 +77,23 @@ func (f *Fake) ParseWebhook(_ context.Context, cred domain.GatewayCredential, re
 }
 
 func (f *Fake) Refund(_ context.Context, _ domain.GatewayCredential, req gateway.RefundRequest) (*gateway.RefundResult, error) {
+	if f.OnRefund != nil {
+		f.OnRefund()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.RefundErr != nil {
+		return nil, f.RefundErr
+	}
 	f.Refunds = append(f.Refunds, req)
 	return &gateway.RefundResult{ProviderRef: "fake-refund"}, nil
+}
+
+// RefundCount returns how many refunds the provider accepted.
+func (f *Fake) RefundCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.Refunds)
 }
 
 // NoRefund wraps a Fake but hides its Refund method, to test providers that

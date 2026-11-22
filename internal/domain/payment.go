@@ -77,6 +77,11 @@ type Payment struct {
 	Currency       string
 	RefundedAmount int64
 
+	// PendingRefundAmount is reserved by refunds that are in flight at the
+	// provider. Reserving before calling the provider (and saving under the
+	// optimistic lock) stops two concurrent refunds from both going through.
+	PendingRefundAmount int64
+
 	Status        Status
 	FailureReason string
 	Description   string
@@ -190,9 +195,10 @@ func (p *Payment) MarkFailed(reason string, at time.Time) error {
 	return nil
 }
 
-// RefundableAmount is how much can still be refunded.
+// RefundableAmount is how much can still be refunded, excluding amounts
+// already refunded or reserved by refunds in flight.
 func (p *Payment) RefundableAmount() int64 {
-	return p.Amount - p.RefundedAmount
+	return p.Amount - p.RefundedAmount - p.PendingRefundAmount
 }
 
 // ValidateRefund checks a refund amount before calling the provider.
@@ -209,16 +215,54 @@ func (p *Payment) ValidateRefund(amount int64) error {
 	return nil
 }
 
-// ApplyRefund records a refund that the provider accepted.
-func (p *Payment) ApplyRefund(amount int64, at time.Time) error {
+// A refund is a three-step process so that money can never be refunded
+// twice:
+//
+//	ReserveRefund   save the reservation      (before calling the provider)
+//	CompleteRefund  provider accepted it      (reservation → refunded)
+//	ReleaseRefund   provider rejected it      (reservation dropped)
+
+// ReserveRefund holds amount for a refund about to be sent to the provider.
+func (p *Payment) ReserveRefund(amount int64, at time.Time) error {
 	if err := p.ValidateRefund(amount); err != nil {
 		return err
 	}
-	p.RefundedAmount += amount
-	p.Status = StatusPartiallyRefunded
-	if p.RefundedAmount == p.Amount {
-		p.Status = StatusRefunded
+	p.PendingRefundAmount += amount
+	p.UpdatedAt = at
+	return nil
+}
+
+// CompleteRefund turns a reservation into a refund the provider accepted.
+func (p *Payment) CompleteRefund(amount int64, at time.Time) error {
+	if err := p.takeReservation(amount); err != nil {
+		return err
 	}
 	p.UpdatedAt = at
+	if p.Status == StatusRefunded {
+		return nil // a provider webhook already reported the full refund
+	}
+	p.RefundedAmount += amount
+	p.Status = StatusPartiallyRefunded
+	if p.RefundedAmount >= p.Amount {
+		p.RefundedAmount = p.Amount
+		p.Status = StatusRefunded
+	}
+	return nil
+}
+
+// ReleaseRefund drops a reservation after the provider rejected the refund.
+func (p *Payment) ReleaseRefund(amount int64, at time.Time) error {
+	if err := p.takeReservation(amount); err != nil {
+		return err
+	}
+	p.UpdatedAt = at
+	return nil
+}
+
+func (p *Payment) takeReservation(amount int64) error {
+	if amount <= 0 || amount > p.PendingRefundAmount {
+		return fmt.Errorf("%w: no pending refund of %d (pending is %d)", ErrInvalidTransition, amount, p.PendingRefundAmount)
+	}
+	p.PendingRefundAmount -= amount
 	return nil
 }
