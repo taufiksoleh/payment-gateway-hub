@@ -172,9 +172,18 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 
 ## API
 
+The full reference is an OpenAPI 3.1 document,
+[docs/api/openapi.yaml](docs/api/openapi.yaml): every endpoint, field, error
+code and the webhook you receive. A running hub serves it too:
+
+- **`/docs`:** browsable reference, e.g. http://localhost:8080/docs
+- **`/openapi.yaml`:** the raw document, for Postman, Insomnia or client
+  generators such as `openapi-generator`
+
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/healthz` | — | Liveness |
+| GET | `/docs`, `/openapi.yaml` | — | API reference |
 | GET | `/v1/providers` | — | Registered providers |
 | POST | `/v1/merchants` | admin token | Register a merchant |
 | POST | `/v1/merchants/{id}/api-keys` | admin token | Issue a key for a merchant (`revoke_existing` for a leaked key) |
@@ -472,6 +481,10 @@ make test-race   # with race detector
 make lint        # golangci-lint
 make cover       # coverage summary
 ```
+
+Changing the API? Update [docs/api/openapi.yaml](docs/api/openapi.yaml) in the
+same change. `go test ./internal/transport/httpapi/` fails when a route, a
+request or response field, or an error code is missing from it.
 
 PostgreSQL and Redis integration tests (start them with `make up`, or only
 the databases with `docker compose up -d postgres redis`):

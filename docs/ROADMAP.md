@@ -168,7 +168,7 @@ payments to the cheapest option leave money on the table.
 
 | Item | Why |
 |---|---|
-| **OpenAPI 3 spec**, generated docs and a Postman collection | One source of truth for the API, used by every SDK |
+| **OpenAPI 3 spec** and generated docs ✅ | Done: [docs/api/openapi.yaml](api/openapi.yaml), served at `/docs`, kept in step with the code by tests. Postman and Insomnia import the document directly |
 | **SDKs:** PHP first, then Node.js, Go and Python | PHP (Laravel) is common among Indonesian SMB stacks. Each SDK includes webhook signature verification |
 | **Plugins:** WooCommerce, then Laravel | Lets non-developers adopt the hub |
 | **Merchant dashboard** | Payments, refunds, webhook deliveries and replay, API keys, gateway credentials, routing rules, reconciliation. Built on the existing API, with no private endpoints |

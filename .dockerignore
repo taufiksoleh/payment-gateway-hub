@@ -5,5 +5,4 @@ coverage.out
 .env
 .env.*
 !.env.example
-*.md
-docs
+**/*.md

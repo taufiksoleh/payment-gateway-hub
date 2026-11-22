@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	apidocs "github.com/taufiksoleh/payment-gateway-hub/docs/api"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
@@ -78,6 +79,8 @@ func NewRouter(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.Handle("GET /v1/providers", public(h.listProviders))
+	mux.Handle("GET /openapi.yaml", public(serveBytes("application/yaml", apidocs.Spec)))
+	mux.Handle("GET /docs", public(serveBytes("text/html; charset=utf-8", apidocs.Page)))
 
 	mux.Handle("POST /v1/merchants", admin(h.registerMerchant))
 	mux.Handle("POST /v1/merchants/{id}/api-keys", admin(h.issueAPIKey))
@@ -119,6 +122,14 @@ type handlers struct {
 	merchants MerchantUsecase
 	webhooks  WebhookUsecase
 	providers []domain.Provider
+}
+
+// serveBytes serves an embedded file.
+func serveBytes(contentType string, body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(body)
+	}
 }
 
 func (h *handlers) health(w http.ResponseWriter, _ *http.Request) {

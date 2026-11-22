@@ -1,0 +1,1207 @@
+openapi: 3.1.0
+info:
+  title: Payment Gateway Hub API
+  version: "1.0"
+  summary: One API over Midtrans, Xendit and DOKU.
+  description: |
+    The hub gives merchants one API for Indonesian payment gateways. Each
+    merchant connects its **own** vendor accounts; the hub never holds money.
+
+    ## Authentication
+
+    - **Merchant endpoints** take the merchant's API key as a bearer token:
+      `Authorization: Bearer pgh_…`. Keys are issued at registration and can
+      be rotated without downtime.
+    - **Admin endpoints** take the `ADMIN_TOKEN` configured on the hub.
+    - **Vendor notifications** (`/webhooks/...`) are authenticated by each
+      vendor's signature.
+
+    ## Conventions
+
+    - Amounts are integers in IDR, which has no minor unit: `150000` is
+      Rp150,000.
+    - Times are RFC 3339.
+    - Every response carries `X-Request-Id` (yours if you sent one, otherwise
+      generated). Quote it when reporting a problem.
+    - Errors always have the shape of the `Error` schema. Branch on
+      `error.code`, not on the message.
+
+    ## Rate limits
+
+    Merchant and admin endpoints are rate limited. Limited responses carry
+    `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`; over the
+    limit the hub answers `429 rate_limited` with `Retry-After` in seconds.
+    Vendor notifications and `/healthz` are never limited.
+
+    ## Merchant webhooks
+
+    Payment status changes are sent to the merchant's `webhook_url`, signed
+    with its `webhook_secret`. See the `webhooks` section of this document.
+  license:
+    name: See repository
+    url: https://github.com/taufiksoleh/payment-gateway-hub
+servers:
+  - url: http://localhost:8080
+    description: Local Docker stack (`make up`)
+
+tags:
+  - name: Payments
+    description: Create, read, sync and refund payments.
+  - name: Webhooks
+    description: Inspect and replay the webhooks the hub sends to you.
+  - name: Gateways
+    description: Connect your own Midtrans, Xendit and DOKU accounts.
+  - name: Account
+    description: API keys and account settings.
+  - name: Admin
+    description: Merchant onboarding, with the admin token.
+  - name: Vendor notifications
+    description: Called by the vendors, not by merchants.
+  - name: System
+    description: Health and discovery.
+
+security:
+  - merchantKey: []
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      operationId: health
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+
+  /openapi.yaml:
+    get:
+      tags: [System]
+      operationId: getOpenAPISpec
+      summary: This document
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI document, for code generators and API tools.
+          content:
+            application/yaml:
+              schema: { type: string }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /docs:
+    get:
+      tags: [System]
+      operationId: getAPIDocs
+      summary: Browsable API reference
+      security: []
+      responses:
+        "200":
+          description: An HTML page rendering this document.
+          content:
+            text/html:
+              schema: { type: string }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/providers:
+    get:
+      tags: [System]
+      operationId: listProviders
+      summary: List the vendors this hub supports
+      security: []
+      responses:
+        "200":
+          description: Supported vendors, sorted.
+          headers:
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimit-Limit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimit-Reset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [providers]
+                properties:
+                  providers:
+                    type: array
+                    items: { $ref: "#/components/schemas/Provider" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/merchants:
+    post:
+      tags: [Admin]
+      operationId: registerMerchant
+      summary: Register a merchant
+      description: |
+        Creates a merchant and its first API key. The response is the **only**
+        time the API key and webhook secret are shown; store them securely.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterMerchantRequest" }
+      responses:
+        "201":
+          description: Merchant created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegisteredMerchant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/merchants/{id}/api-keys:
+    post:
+      tags: [Admin]
+      operationId: issueAPIKey
+      summary: Issue a new API key for a merchant
+      description: |
+        For a merchant that lost its key, or whose key leaked. With
+        `revoke_existing`, every other key stops working immediately.
+      security:
+        - adminToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Merchant id.
+          schema: { type: string, example: mch_3f9a1c2b7d4e }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueAPIKeyRequest" }
+      responses:
+        "201":
+          description: Key issued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssueAPIKeyResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/api-keys:
+    get:
+      tags: [Account]
+      operationId: listAPIKeys
+      summary: List your API keys
+      description: Keys are never shown again after they are issued; only a hint is returned.
+      responses:
+        "200":
+          description: Your keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [api_keys]
+                properties:
+                  api_keys:
+                    type: array
+                    items: { $ref: "#/components/schemas/APIKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/api-keys/rotate:
+    post:
+      tags: [Account]
+      operationId: rotateAPIKey
+      summary: Rotate your API key
+      description: |
+        Issues a new key. Your other keys keep working until the grace period
+        ends (default 24 hours, at most 7 days), so you can deploy the new key
+        without downtime.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RotateAPIKeyRequest" }
+      responses:
+        "201":
+          description: New key issued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RotateAPIKeyResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/api-keys/{id}:
+    delete:
+      tags: [Account]
+      operationId: revokeAPIKey
+      summary: Revoke an API key immediately
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: API key id, from `GET /v1/api-keys`.
+          schema: { type: string, example: key_8c1d2e3f4a5b }
+      responses:
+        "204":
+          description: Revoked.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`conflict`: this is your last usable key. Rotate first."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/settings:
+    get:
+      tags: [Account]
+      operationId: getSettings
+      summary: Get your settings
+      responses:
+        "200":
+          description: Your settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    patch:
+      tags: [Account]
+      operationId: updateSettings
+      summary: Change your settings
+      description: Fields you leave out keep their value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateSettingsRequest" }
+      responses:
+        "200":
+          description: The settings after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/gateways:
+    get:
+      tags: [Gateways]
+      operationId: listGateways
+      summary: List your connected vendors
+      responses:
+        "200":
+          description: Connected vendors. Secrets are never returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [gateways]
+                properties:
+                  gateways:
+                    type: array
+                    items: { $ref: "#/components/schemas/Gateway" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/gateways/{provider}:
+    parameters:
+      - $ref: "#/components/parameters/ProviderPath"
+    put:
+      tags: [Gateways]
+      operationId: saveGateway
+      summary: Connect a vendor, or replace its credentials
+      description: |
+        Stores your own vendor credentials, encrypted at rest. Then set the
+        vendor's notification URL to `<hub>` + `webhook_path` from the
+        response. The secrets each vendor needs:
+
+        | Provider | `secrets` keys |
+        |---|---|
+        | `midtrans` | `server_key` |
+        | `xendit` | `secret_key`, `callback_token` |
+        | `doku` | `client_id`, `secret_key` |
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SaveGatewayRequest" }
+            examples:
+              midtrans:
+                value:
+                  environment: sandbox
+                  secrets: { server_key: SB-Mid-server-xxxxxxxx }
+              xendit:
+                value:
+                  environment: sandbox
+                  secrets: { secret_key: xnd_development_xxxxxxxx, callback_token: xxxxxxxx }
+              doku:
+                value:
+                  environment: sandbox
+                  secrets: { client_id: BRN-0000-0000000000000, secret_key: SK-xxxxxxxx }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Gateway" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: |
+            `invalid_input` for a missing secret or bad environment;
+            `unsupported` for an unknown provider.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Gateways]
+      operationId: deleteGateway
+      summary: Disconnect a vendor
+      responses:
+        "204":
+          description: Credentials removed.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Create a payment
+      description: |
+        Opens a payment at the chosen vendor and returns how the customer pays
+        (`action`).
+
+        - **Same `order_id` again:** returns the existing payment instead of
+          charging twice.
+        - **Two requests for one `order_id` at the same time:** the second gets
+          `409 conflict`; retry shortly to receive the first one's payment.
+        - **`Idempotency-Key`:** recommended for every create; required when
+          your `require_idempotency_key` setting is on.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePaymentRequest" }
+            examples:
+              qris:
+                summary: QRIS
+                value:
+                  order_id: INV-2026-0001
+                  provider: xendit
+                  method: qris
+                  channel: qris
+                  amount: 150000
+              virtualAccount:
+                summary: BCA virtual account, expiring in a day
+                value:
+                  order_id: INV-2026-0002
+                  provider: midtrans
+                  method: virtual_account
+                  channel: bca
+                  amount: 250000
+                  description: Order 0002
+                  customer: { name: Budi Santoso, email: budi@example.com, phone: "+6281234567890" }
+                  expires_at: "2026-11-23T12:00:00+07:00"
+      responses:
+        "201":
+          description: Payment created, or the existing payment for this `order_id`.
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/Idempotent-Replayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: |
+            `conflict`: another request is creating a payment for this
+            `order_id`. `idempotency_in_progress`: a request with this
+            `Idempotency-Key` is still running. Retry shortly in both cases.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            `invalid_input` (see `field`), `unsupported` (the vendor doesn't
+            offer this method or channel), or `idempotency_key_reused`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/ProviderError" }
+    get:
+      tags: [Payments]
+      operationId: listPayments
+      summary: List your payments
+      description: |
+        Newest first. Filters combine with AND. Pages are cut by
+        `(created_at, id)`, so payments created while you page never cause
+        skipped or repeated rows.
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/PaymentStatus" }
+        - name: provider
+          in: query
+          schema: { $ref: "#/components/schemas/Provider" }
+        - name: method
+          in: query
+          schema: { $ref: "#/components/schemas/Method" }
+        - name: order_id
+          in: query
+          description: Your order reference, exact match.
+          schema: { type: string }
+        - name: created_from
+          in: query
+          description: Inclusive. Encode `+` in offsets as `%2B`, or use `Z`.
+          schema: { type: string, format: date-time }
+        - name: created_to
+          in: query
+          description: Exclusive.
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of payments.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/payments/{id}:
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      summary: Get a payment
+      parameters:
+        - $ref: "#/components/parameters/PaymentID"
+      responses:
+        "200":
+          description: The payment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/payments/{id}/sync:
+    post:
+      tags: [Payments]
+      operationId: syncPayment
+      summary: Pull the latest status from the vendor
+      description: |
+        For when a vendor notification was missed. Only pending payments are
+        checked; others are returned as they are.
+      parameters:
+        - $ref: "#/components/parameters/PaymentID"
+      responses:
+        "200":
+          description: The payment after the check.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/ProviderError" }
+
+  /v1/payments/{id}/refunds:
+    post:
+      tags: [Payments]
+      operationId: refundPayment
+      summary: Refund a payment
+      description: |
+        Refunds all or part of a paid payment through the vendor. Supported by
+        Midtrans (cards, GoPay, ShopeePay, QRIS) and Xendit (e-wallets, QRIS);
+        DOKU refunds are done in its dashboard.
+
+        If the vendor's answer is lost (timeout, 5xx), the hub answers
+        `502 provider_error` but keeps the amount reserved in
+        `pending_refund_amount`, so it can't be refunded twice. A background
+        job resends the same refund until the vendor accepts it, then the
+        payment changes status and a webhook fires.
+
+        Without an `Idempotency-Key`, a retried request can refund again, up
+        to the amount still refundable.
+      parameters:
+        - $ref: "#/components/parameters/PaymentID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefundRequest" }
+            examples:
+              full:
+                summary: Full refund
+                value: {}
+              partial:
+                summary: Partial refund
+                value: { amount: 50000, reason: customer request }
+      responses:
+        "200":
+          description: Refund accepted; the payment after it.
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/Idempotent-Replayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            `invalid_state`: the payment isn't paid. `concurrent_update`:
+            retry. `idempotency_in_progress`: a request with this key is still
+            running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            `invalid_input`: the amount exceeds what's refundable (see
+            `field`). `unsupported`: the vendor has no refund API.
+            `idempotency_key_reused`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/ProviderError" }
+
+  /v1/webhooks:
+    get:
+      tags: [Webhooks]
+      operationId: listWebhooks
+      summary: List the webhooks sent to you
+      description: Newest first, without payloads.
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/WebhookStatus" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of webhooks.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/webhooks/{id}:
+    get:
+      tags: [Webhooks]
+      operationId: getWebhook
+      summary: Get one webhook, with its exact payload
+      parameters:
+        - $ref: "#/components/parameters/WebhookID"
+      responses:
+        "200":
+          description: The webhook.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Webhook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/webhooks/{id}/replay:
+    post:
+      tags: [Webhooks]
+      operationId: replayWebhook
+      summary: Re-send a dead webhook
+      description: The webhook goes back to `pending` and is delivered with the same `id` and body.
+      parameters:
+        - $ref: "#/components/parameters/WebhookID"
+      responses:
+        "200":
+          description: The webhook, now pending.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Webhook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`invalid_state`: only dead webhooks can be replayed."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/webhooks/replay:
+    post:
+      tags: [Webhooks]
+      operationId: replayDeadWebhooks
+      summary: Re-send all your dead webhooks
+      responses:
+        "200":
+          description: How many webhooks were queued again.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [replayed]
+                properties:
+                  replayed: { type: integer, minimum: 0, example: 3 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /webhooks/{provider}/{merchantID}:
+    post:
+      tags: [Vendor notifications]
+      operationId: providerWebhook
+      summary: Receive a vendor notification
+      description: |
+        Configure this URL as the notification URL in each vendor's dashboard
+        (`webhook_path` from `PUT /v1/gateways/{provider}`). The body is the
+        vendor's own format and is verified with the merchant's credentials:
+        Midtrans SHA-512 `signature_key`, Xendit `x-callback-token` header,
+        DOKU HMAC-SHA256 `Signature` header. Never rate limited.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderPath"
+        - name: merchantID
+          in: path
+          required: true
+          schema: { type: string, example: mch_3f9a1c2b7d4e }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: The vendor's notification body.
+      responses:
+        "200":
+          description: Accepted, including valid events the hub ignores.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+        "401":
+          description: "`invalid_signature`: the signature didn't verify, or the merchant has no credentials for this vendor."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`not_found`: the notification is for a payment this hub didn't create, such as a dashboard test."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/InvalidInput" }
+
+webhooks:
+  paymentEvent:
+    post:
+      summary: Payment status changed (sent to your webhook_url)
+      description: |
+        Sent for every status change. `type` is `payment.<status>`, for
+        example `payment.paid`. `data` is the payment right after the change.
+
+        **Verify the signature:** compute `HMAC-SHA256(webhook_secret, t + "." + raw_body)`
+        and compare it in constant time with `v1` from `X-Hub-Signature`.
+        Reject requests whose `t` is more than about 5 minutes old.
+
+        **Delivery:** at least once, so de-duplicate on `id`. Any non-2xx
+        answer or a timeout (10 s) is retried with exponential backoff from
+        10 s, capped at 1 hour, for 12 attempts; then the webhook is dead and
+        can be replayed with `POST /v1/webhooks/{id}/replay`. Order isn't
+        guaranteed during retries; use `data.updated_at`.
+      security: []
+      parameters:
+        - name: X-Hub-Signature
+          in: header
+          required: true
+          description: '`t=<unix seconds>,v1=<hex HMAC-SHA256 of t + "." + body>`'
+          schema: { type: string, example: "t=1795250000,v1=5d41402abc4b2a76b9719d911017c592ae0f5e2b1b1c3a8e0f7a6b5c4d3e2f10" }
+        - name: User-Agent
+          in: header
+          schema: { type: string, const: payment-gateway-hub }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentEvent" }
+      responses:
+        "200":
+          description: Any 2xx marks the webhook delivered.
+
+components:
+  securitySchemes:
+    merchantKey:
+      type: http
+      scheme: bearer
+      description: Your merchant API key, `pgh_…`.
+    adminToken:
+      type: http
+      scheme: bearer
+      description: The hub's `ADMIN_TOKEN`.
+
+  parameters:
+    PaymentID:
+      name: id
+      in: path
+      required: true
+      description: Payment id.
+      schema: { type: string, example: pay_7c2e9f1a3b5d }
+    WebhookID:
+      name: id
+      in: path
+      required: true
+      description: Webhook (event) id.
+      schema: { type: string, example: evt_1a2b3c4d5e6f }
+    ProviderPath:
+      name: provider
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Provider" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Any unique string, such as a UUID. Reuse it when you retry the same
+        operation: a repeat of a successful request returns the stored
+        response with `Idempotent-Replayed: true`. Failed requests aren't
+        stored, so they can be retried with the same key. Keys are kept for
+        24 hours, per merchant.
+      schema: { type: string, minLength: 1, maxLength: 255, example: 6f1c2a0e-7b4d-4e2a-9c1f-INV-2026-0001 }
+    Limit:
+      name: limit
+      in: query
+      description: Page size.
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: "`next_cursor` from the previous page."
+      schema: { type: string }
+
+  headers:
+    RateLimit-Limit:
+      description: Bucket size.
+      schema: { type: integer }
+    RateLimit-Remaining:
+      description: Requests left in the bucket.
+      schema: { type: integer }
+    RateLimit-Reset:
+      description: Seconds until the bucket is full again.
+      schema: { type: integer }
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+    Idempotent-Replayed:
+      description: "`true` when this is the stored response of an earlier request with the same `Idempotency-Key`."
+      schema: { type: string, const: "true" }
+
+  responses:
+    InvalidInput:
+      description: "`invalid_input`: a field is missing or invalid; `field` names it."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: invalid_input, field: amount, message: must be greater than zero }
+    Unauthorized:
+      description: "`unauthorized`: missing, invalid, expired or revoked credentials."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: unauthorized, message: missing or invalid credentials }
+    NotFound:
+      description: "`not_found`: no such resource in your account."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: not_found, message: resource not found }
+    RateLimited:
+      description: "`rate_limited`: too many requests."
+      headers:
+        Retry-After: { $ref: "#/components/headers/Retry-After" }
+        RateLimit-Limit: { $ref: "#/components/headers/RateLimit-Limit" }
+        RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+        RateLimit-Reset: { $ref: "#/components/headers/RateLimit-Reset" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: rate_limited, message: "too many requests, retry after 2s" }
+    ProviderError:
+      description: "`provider_error`: the vendor rejected the request or didn't answer. The vendor's message is passed through."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: provider_error, message: "create payment at midtrans: midtrans: http 401: Access denied" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable error code; branch on this.
+              enum:
+                - invalid_input
+                - unsupported
+                - not_found
+                - unauthorized
+                - invalid_signature
+                - conflict
+                - concurrent_update
+                - invalid_state
+                - idempotency_key_reused
+                - idempotency_in_progress
+                - rate_limited
+                - provider_error
+                - internal_error
+            message:
+              type: string
+              description: Human-readable; may change.
+            field:
+              type: string
+              description: The request field at fault, for `invalid_input`.
+
+    Provider:
+      type: string
+      enum: [doku, midtrans, xendit]
+    Environment:
+      type: string
+      enum: [sandbox, production]
+    Method:
+      type: string
+      enum: [virtual_account, qris, ewallet, retail_outlet, card]
+    Channel:
+      type: string
+      description: |
+        Depends on method and provider:
+
+        | Method | Midtrans | Xendit | DOKU |
+        |---|---|---|---|
+        | `virtual_account` | bca, bni, bri, cimb, permata, mandiri | bca, bni, bri, mandiri, permata, bsi, cimb | bca, mandiri, bri, bni, permata, cimb |
+        | `qris` | qris | qris | qris |
+        | `ewallet` | gopay, shopeepay | ovo, dana, shopeepay, linkaja | ovo, dana, shopeepay, linkaja |
+        | `retail_outlet` | alfamart, indomaret | alfamart, indomaret | alfamart, indomaret |
+        | `card` | — | — | card |
+      enum: [bca, bni, bri, mandiri, permata, cimb, bsi, qris, gopay, ovo, dana, shopeepay, linkaja, alfamart, indomaret, card]
+    PaymentStatus:
+      type: string
+      description: |
+        `pending` → `paid` / `failed` / `expired` / `cancelled`;
+        `paid` → `partially_refunded` → `refunded`.
+      enum: [pending, paid, failed, expired, cancelled, partially_refunded, refunded]
+    FailureReason:
+      type: string
+      description: Why a payment failed, expired or was cancelled.
+      enum: [expired, cancelled, declined, insufficient_balance, fraud_suspected, provider_error]
+
+    Customer:
+      type: object
+      description: Optional, but some channels need it (OVO needs a phone number).
+      properties:
+        name: { type: string, example: Budi Santoso }
+        email: { type: string, format: email, example: budi@example.com }
+        phone: { type: string, example: "+6281234567890" }
+
+    PaymentAction:
+      type: object
+      description: How the customer pays. Only the fields for the chosen method are set.
+      properties:
+        virtual_account_number:
+          type: string
+          description: Virtual account number; for Mandiri bill payment through Midtrans, the bill key.
+          example: "8800123456789012"
+        biller_code:
+          type: string
+          description: Mandiri bill payment company code, paid together with the bill key.
+          example: "70012"
+        qr_string:
+          type: string
+          description: QRIS payload to render as a QR code.
+        qr_image_url: { type: string, format: uri }
+        redirect_url:
+          type: string
+          format: uri
+          description: Hosted checkout or e-wallet web flow.
+        deep_link_url:
+          type: string
+          format: uri
+          description: Opens the e-wallet app.
+        payment_code:
+          type: string
+          description: Code to pay at a retail outlet.
+
+    Payment:
+      type: object
+      required: [id, order_id, provider, method, channel, amount, currency, refunded_amount, status, action, created_at, updated_at]
+      properties:
+        id: { type: string, example: pay_7c2e9f1a3b5d }
+        order_id: { type: string, description: Your reference, unique per merchant., example: INV-2026-0001 }
+        provider: { $ref: "#/components/schemas/Provider" }
+        provider_ref: { type: string, description: The vendor's transaction id. }
+        method: { $ref: "#/components/schemas/Method" }
+        channel: { $ref: "#/components/schemas/Channel" }
+        amount: { type: integer, minimum: 1, example: 150000 }
+        currency: { type: string, const: IDR }
+        refunded_amount: { type: integer, minimum: 0 }
+        pending_refund_amount:
+          type: integer
+          minimum: 0
+          description: Reserved by refunds whose outcome isn't known yet; can't be refunded again.
+        status: { $ref: "#/components/schemas/PaymentStatus" }
+        failure_reason: { $ref: "#/components/schemas/FailureReason" }
+        description: { type: string }
+        customer: { $ref: "#/components/schemas/Customer" }
+        action: { $ref: "#/components/schemas/PaymentAction" }
+        expires_at: { type: string, format: date-time }
+        paid_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreatePaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [order_id, provider, method, channel, amount]
+      properties:
+        order_id:
+          type: string
+          maxLength: 50
+          description: Your reference. A repeat returns the existing payment.
+        provider: { $ref: "#/components/schemas/Provider" }
+        method: { $ref: "#/components/schemas/Method" }
+        channel: { $ref: "#/components/schemas/Channel" }
+        amount: { type: integer, minimum: 1 }
+        currency: { type: string, const: IDR, default: IDR }
+        description: { type: string }
+        customer: { $ref: "#/components/schemas/Customer" }
+        expires_at:
+          type: string
+          format: date-time
+          description: Must be in the future. Omit for the vendor's default.
+        return_url:
+          type: string
+          format: uri
+          description: Where hosted checkout and e-wallet flows send the customer back.
+
+    PaymentList:
+      type: object
+      required: [payments]
+      properties:
+        payments:
+          type: array
+          items: { $ref: "#/components/schemas/Payment" }
+        next_cursor:
+          type: string
+          description: Pass as `cursor` for the next page. Absent on the last page.
+
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        amount:
+          type: integer
+          minimum: 0
+          description: Omit or 0 to refund everything still refundable.
+        reason: { type: string }
+
+    Gateway:
+      type: object
+      required: [provider, environment, webhook_path, created_at, updated_at]
+      properties:
+        provider: { $ref: "#/components/schemas/Provider" }
+        environment: { $ref: "#/components/schemas/Environment" }
+        webhook_path:
+          type: string
+          description: Set `<hub>` + this path as the vendor's notification URL.
+          example: /webhooks/midtrans/mch_3f9a1c2b7d4e
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SaveGatewayRequest:
+      type: object
+      additionalProperties: false
+      required: [environment, secrets]
+      properties:
+        environment: { $ref: "#/components/schemas/Environment" }
+        secrets:
+          type: object
+          additionalProperties: { type: string }
+          description: Vendor-specific keys; see the operation description.
+
+    Settings:
+      type: object
+      required: [require_idempotency_key]
+      properties:
+        require_idempotency_key:
+          type: boolean
+          description: When true, payment and refund creation without `Idempotency-Key` get `422 invalid_input`.
+
+    UpdateSettingsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        require_idempotency_key: { type: boolean }
+
+    APIKeyStatus:
+      type: string
+      description: "`expiring` keys still work until `expires_at` (rotation grace period)."
+      enum: [active, expiring, expired, revoked]
+
+    APIKey:
+      type: object
+      required: [id, hint, status, current, created_at]
+      properties:
+        id: { type: string, example: key_8c1d2e3f4a5b }
+        hint: { type: string, description: The key's last characters., example: "pgh_…a1b2" }
+        status: { $ref: "#/components/schemas/APIKeyStatus" }
+        current: { type: boolean, description: The key used for this request. }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+
+    IssuedAPIKey:
+      type: object
+      required: [api_key, key]
+      properties:
+        api_key:
+          type: string
+          description: The new key. Shown only in this response.
+          example: pgh_9QmZ3xTq0yJ7rB2cVw8LkN4s
+        key: { $ref: "#/components/schemas/APIKey" }
+
+    RotateAPIKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        grace_period_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+          default: 86400
+          description: How long your other keys keep working. 0 stops them now.
+
+    RotateAPIKeyResponse:
+      allOf:
+        - $ref: "#/components/schemas/IssuedAPIKey"
+        - type: object
+          required: [previous_keys_expire_at]
+          properties:
+            previous_keys_expire_at: { type: string, format: date-time }
+
+    IssueAPIKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        revoke_existing:
+          type: boolean
+          default: false
+          description: Revoke every other key immediately, for a leaked key.
+
+    IssueAPIKeyResponse:
+      allOf:
+        - $ref: "#/components/schemas/IssuedAPIKey"
+        - type: object
+          required: [revoked]
+          properties:
+            revoked: { type: integer, minimum: 0, description: How many keys were revoked. }
+
+    RegisterMerchantRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, example: Toko Budi }
+        webhook_url:
+          type: string
+          format: uri
+          description: Receives payment events. Omit to disable delivery.
+          example: https://toko.example/hooks/payments
+
+    RegisteredMerchant:
+      type: object
+      required: [id, name, api_key, webhook_secret, created_at]
+      properties:
+        id: { type: string, example: mch_3f9a1c2b7d4e }
+        name: { type: string }
+        webhook_url: { type: string, format: uri }
+        api_key:
+          type: string
+          description: Shown only in this response.
+        webhook_secret:
+          type: string
+          description: Verifies `X-Hub-Signature` on webhooks. Shown only in this response.
+        created_at: { type: string, format: date-time }
+
+    WebhookStatus:
+      type: string
+      description: "`delivered` includes events settled without sending because no `webhook_url` was set."
+      enum: [pending, delivered, dead]
+
+    Webhook:
+      type: object
+      required: [id, type, payment_id, status, attempts, created_at]
+      properties:
+        id: { type: string, description: Event id, also inside the payload. }
+        type: { type: string, example: payment.paid }
+        payment_id: { type: string }
+        status: { $ref: "#/components/schemas/WebhookStatus" }
+        attempts: { type: integer, minimum: 0 }
+        last_error: { type: string }
+        next_attempt_at:
+          type: string
+          format: date-time
+          description: Set while pending.
+        created_at: { type: string, format: date-time }
+        delivered_at: { type: string, format: date-time }
+        dead_at: { type: string, format: date-time }
+        payload:
+          $ref: "#/components/schemas/PaymentEvent"
+          description: The exact body sent. Only in `GET /v1/webhooks/{id}`.
+
+    WebhookList:
+      type: object
+      required: [webhooks]
+      properties:
+        webhooks:
+          type: array
+          items: { $ref: "#/components/schemas/Webhook" }
+        next_cursor: { type: string }
+
+    PaymentEvent:
+      type: object
+      required: [id, type, created_at, data]
+      properties:
+        id: { type: string, description: De-duplicate on this., example: evt_1a2b3c4d5e6f }
+        type:
+          type: string
+          enum: [payment.paid, payment.failed, payment.expired, payment.cancelled, payment.partially_refunded, payment.refunded]
+        created_at: { type: string, format: date-time }
+        data: { $ref: "#/components/schemas/Payment" }
