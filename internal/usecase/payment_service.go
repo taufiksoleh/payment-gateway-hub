@@ -15,25 +15,21 @@ import (
 // PaymentService creates payments through providers and keeps their status
 // up to date from webhooks and status syncs.
 type PaymentService struct {
-	payments  PaymentRepository
-	merchants MerchantRepository
-	creds     CredentialRepository
-	gateways  GatewayResolver
-	notifier  MerchantNotifier
-	log       *slog.Logger
-	now       func() time.Time
+	payments PaymentRepository
+	creds    CredentialRepository
+	gateways GatewayResolver
+	log      *slog.Logger
+	now      func() time.Time
 }
 
 // PaymentServiceDeps lists everything PaymentService needs. Using a struct
 // keeps the constructor readable as dependencies grow.
 type PaymentServiceDeps struct {
-	Payments  PaymentRepository
-	Merchants MerchantRepository
-	Creds     CredentialRepository
-	Gateways  GatewayResolver
-	Notifier  MerchantNotifier
-	Logger    *slog.Logger
-	Now       func() time.Time // optional, defaults to time.Now
+	Payments PaymentRepository
+	Creds    CredentialRepository
+	Gateways GatewayResolver
+	Logger   *slog.Logger
+	Now      func() time.Time // optional, defaults to time.Now
 }
 
 // NewPaymentService wires a PaymentService.
@@ -45,13 +41,11 @@ func NewPaymentService(d PaymentServiceDeps) *PaymentService {
 		d.Logger = slog.Default()
 	}
 	return &PaymentService{
-		payments:  d.Payments,
-		merchants: d.Merchants,
-		creds:     d.Creds,
-		gateways:  d.Gateways,
-		notifier:  d.Notifier,
-		log:       d.Logger,
-		now:       d.Now,
+		payments: d.Payments,
+		creds:    d.Creds,
+		gateways: d.Gateways,
+		log:      d.Logger,
+		now:      d.Now,
 	}
 }
 
@@ -255,7 +249,6 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 			"payment_id", p.ID, "amount", in.Amount, "error", err)
 		return nil, err
 	}
-	s.notify(ctx, p)
 	return p, nil
 }
 
@@ -282,20 +275,21 @@ type statusUpdate struct {
 	ProviderRef string
 }
 
-// applyStatus moves p to the reported status, saves it and notifies the
-// merchant when it actually changed. Invalid transitions (e.g. a late
+// applyStatus moves p to the reported status and saves it. The payment records
+// an event when it actually changes; the repository stores that event in the
+// outbox with the payment, and the dispatcher notifies the merchant. Invalid transitions (e.g. a late
 // "pending" webhook after "paid") are logged and ignored.
 func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, u statusUpdate) error {
-	changed, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+	_, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
 		if p.ProviderRef == "" && u.ProviderRef != "" {
 			p.ProviderRef = u.ProviderRef
+		}
+		if u.Status == domain.StatusPaid && u.PaidAt != nil && p.Status.CanTransitionTo(domain.StatusPaid) {
+			p.PaidAt = u.PaidAt // before the transition, so the recorded event carries it
 		}
 		changed, err := p.TransitionTo(u.Status, s.now())
 		if err != nil || !changed {
 			return false, err
-		}
-		if u.PaidAt != nil && u.Status == domain.StatusPaid {
-			p.PaidAt = u.PaidAt
 		}
 		return true, nil
 	})
@@ -303,11 +297,7 @@ func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, u s
 		s.log.InfoContext(ctx, "ignoring status update", "payment_id", p.ID, "error", err)
 		return nil
 	}
-	if err != nil || !changed {
-		return err
-	}
-	s.notify(ctx, p)
-	return nil
+	return err
 }
 
 // maxUpdateAttempts bounds retries when other requests keep winning the
@@ -343,24 +333,5 @@ func (s *PaymentService) update(ctx context.Context, p *domain.Payment, mutate f
 			return false, fmt.Errorf("reload payment %s: %w", p.ID, err)
 		}
 		*p = *fresh
-	}
-}
-
-// notify sends the merchant webhook. Failures are logged, not returned: the
-// payment state is already saved and the merchant can always poll.
-func (s *PaymentService) notify(ctx context.Context, p *domain.Payment) {
-	if s.notifier == nil {
-		return
-	}
-	m, err := s.merchants.FindByID(ctx, p.MerchantID)
-	if err != nil {
-		s.log.ErrorContext(ctx, "load merchant for notification", "payment_id", p.ID, "error", err)
-		return
-	}
-	if m.WebhookURL == "" {
-		return
-	}
-	if err := s.notifier.Notify(ctx, *m, *p); err != nil {
-		s.log.WarnContext(ctx, "merchant webhook failed", "payment_id", p.ID, "merchant_id", m.ID, "error", err)
 	}
 }

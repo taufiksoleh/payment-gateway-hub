@@ -9,19 +9,23 @@ import (
 	"sync"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 )
 
-// PaymentRepo stores payments in a map.
+// PaymentRepo stores payments in a map. Events recorded on a payment are
+// written to the outbox under the same lock as the payment itself.
 type PaymentRepo struct {
+	outbox *Outbox // nil: events are dropped
+
 	mu   sync.RWMutex
 	byID map[string]domain.Payment
 }
 
-func NewPaymentRepo() *PaymentRepo {
-	return &PaymentRepo{byID: map[string]domain.Payment{}}
+func NewPaymentRepo(ob *Outbox) *PaymentRepo {
+	return &PaymentRepo{outbox: ob, byID: map[string]domain.Payment{}}
 }
 
-func (r *PaymentRepo) Create(_ context.Context, p *domain.Payment) error {
+func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.byID {
@@ -29,13 +33,12 @@ func (r *PaymentRepo) Create(_ context.Context, p *domain.Payment) error {
 			return domain.ErrConflict
 		}
 	}
-	r.byID[p.ID] = *p
-	return nil
+	return r.store(ctx, p)
 }
 
 // Update saves p only if nobody saved it since p was loaded (same Version),
 // then bumps p.Version.
-func (r *PaymentRepo) Update(_ context.Context, p *domain.Payment) error {
+func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	current, ok := r.byID[p.ID]
@@ -46,6 +49,25 @@ func (r *PaymentRepo) Update(_ context.Context, p *domain.Payment) error {
 		return domain.ErrConcurrentModification
 	}
 	p.Version++
+	if err := r.store(ctx, p); err != nil {
+		p.Version--
+		return err
+	}
+	return nil
+}
+
+// store saves p and its recorded events. Callers hold r.mu.
+func (r *PaymentRepo) store(ctx context.Context, p *domain.Payment) error {
+	if r.outbox != nil && len(p.Events()) > 0 {
+		msgs, err := outbox.FromEvents(r.outbox.encode, p.Events())
+		if err != nil {
+			return err
+		}
+		if err := r.outbox.Enqueue(ctx, msgs...); err != nil {
+			return err
+		}
+	}
+	p.ClearEvents()
 	r.byID[p.ID] = *p
 	return nil
 }

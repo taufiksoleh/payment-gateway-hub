@@ -11,6 +11,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
 func now() time.Time { return time.Now() }
@@ -21,6 +22,12 @@ type racingRepo struct {
 	*memory.PaymentRepo
 	interfere func(ctx context.Context, inner *memory.PaymentRepo, paymentID string)
 	updates   int
+}
+
+// wrap plugs a real memory repository (writing to ob) into racingRepo.
+func (r *racingRepo) wrap(ob *memory.Outbox) usecase.PaymentRepository {
+	r.PaymentRepo = memory.NewPaymentRepo(ob)
+	return r
 }
 
 func (r *racingRepo) Update(ctx context.Context, p *domain.Payment) error {
@@ -51,7 +58,7 @@ func webhook(paymentID string, status domain.Status) gateway.WebhookRequest {
 
 func TestUpdate_StaleVersionIsRejected(t *testing.T) {
 	ctx := context.Background()
-	repo := memory.NewPaymentRepo()
+	repo := memory.NewPaymentRepo(nil)
 	p, _ := domain.NewPayment(domain.NewPaymentParams{
 		ID: "pay_1", MerchantID: "m", OrderID: "o", Provider: "fake",
 		Method: domain.MethodQRIS, Channel: domain.ChannelQRIS, Amount: 1,
@@ -73,8 +80,8 @@ func TestUpdate_StaleVersionIsRejected(t *testing.T) {
 }
 
 func TestWebhook_RetriesAfterLosingTheLock(t *testing.T) {
-	repo := &racingRepo{PaymentRepo: memory.NewPaymentRepo()}
-	f := setupWithRepo(t, repo)
+	repo := &racingRepo{}
+	f := setupWithRepo(t, repo.wrap)
 	ctx := context.Background()
 	p, _ := f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
 
@@ -101,14 +108,14 @@ func TestWebhook_RetriesAfterLosingTheLock(t *testing.T) {
 	if repo.updates != 2 {
 		t.Fatalf("updates = %d, want 2 (conflict + retry)", repo.updates)
 	}
-	if len(f.notifier.events) != 1 {
-		t.Fatalf("notifications = %d, want 1", len(f.notifier.events))
+	if ev := f.events(); len(ev) != 1 || ev[0] != "payment.paid" {
+		t.Fatalf("queued webhooks = %v, want exactly one payment.paid", ev)
 	}
 }
 
 func TestWebhook_LosesToAConcurrentFinalStatus(t *testing.T) {
-	repo := &racingRepo{PaymentRepo: memory.NewPaymentRepo()}
-	f := setupWithRepo(t, repo)
+	repo := &racingRepo{}
+	f := setupWithRepo(t, repo.wrap)
 	ctx := context.Background()
 	p, _ := f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
 
@@ -130,14 +137,15 @@ func TestWebhook_LosesToAConcurrentFinalStatus(t *testing.T) {
 	if got.Status != domain.StatusExpired {
 		t.Fatalf("status = %s, want expired", got.Status)
 	}
-	if len(f.notifier.events) != 0 {
-		t.Fatalf("notifications = %d, want 0 from the losing webhook", len(f.notifier.events))
+	// Only the winning write queued a webhook; the losing "paid" queued none.
+	if ev := f.events(); len(ev) != 1 || ev[0] != "payment.expired" {
+		t.Fatalf("queued webhooks = %v, want only payment.expired", ev)
 	}
 }
 
 func TestWebhook_GivesUpAfterRepeatedConflicts(t *testing.T) {
-	repo := &racingRepo{PaymentRepo: memory.NewPaymentRepo()}
-	f := setupWithRepo(t, repo)
+	repo := &racingRepo{}
+	f := setupWithRepo(t, repo.wrap)
 	ctx := context.Background()
 	p, _ := f.payments.Create(ctx, f.merchant.ID, createInput("order-1"))
 
@@ -192,7 +200,7 @@ func TestWebhook_ConcurrentDeliveries(t *testing.T) {
 	if got.Version != 2 {
 		t.Fatalf("version = %d, want 2 (exactly one successful update)", got.Version)
 	}
-	if len(f.notifier.events) != 1 || f.notifier.events[0].Status != got.Status {
-		t.Fatalf("notifications = %+v, want exactly one for %s", f.notifier.events, got.Status)
+	if ev := f.events(); len(ev) != 1 || ev[0] != "payment."+string(got.Status) {
+		t.Fatalf("queued webhooks = %v, want exactly one for %s", ev, got.Status)
 	}
 }

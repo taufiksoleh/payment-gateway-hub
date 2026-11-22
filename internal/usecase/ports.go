@@ -1,6 +1,8 @@
 // Package usecase holds the application logic. It depends only on the domain
-// and on the interfaces declared in this file (Dependency Inversion): storage,
-// gateways and notifications are plugged in from the outside.
+// and on the interfaces declared in this file (Dependency Inversion): storage
+// and gateways are plugged in from the outside. Merchant notifications are not a
+// use case concern: payments record events and repositories put them in the
+// outbox (see internal/outbox).
 package usecase
 
 import (
@@ -41,9 +43,4 @@ type CredentialRepository interface {
 // implements it.
 type GatewayResolver interface {
 	Get(p domain.Provider) (gateway.Gateway, error)
-}
-
-// MerchantNotifier tells a merchant that one of its payments changed.
-type MerchantNotifier interface {
-	Notify(ctx context.Context, m domain.Merchant, p domain.Payment) error
 }

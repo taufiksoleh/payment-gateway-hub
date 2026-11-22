@@ -39,7 +39,7 @@ should only show `domain`, `gateway` (the port package), and `platform/id`.
 | **O**pen/closed | Adding a vendor means a new package plus one line in `app.go`. The domain, use cases and HTTP layer don't change. |
 | **L**iskov substitution | Every adapter honours the same `gateway.Gateway` contract (for example, a bad signature always returns `domain.ErrInvalidSignature`). `memory` and `postgres` repositories are interchangeable. |
 | **I**nterface segregation | `gateway.Refunder` is a separate, optional interface. DOKU simply does not implement it. The HTTP layer depends on small `PaymentUsecase` and `MerchantUsecase` interfaces, not concrete services. |
-| **D**ependency inversion | Use cases depend on `PaymentRepository`, `GatewayResolver` and `MerchantNotifier`, all declared in `usecase/ports.go`. Concrete types are chosen only in `internal/app`. |
+| **D**ependency inversion | Use cases depend on `PaymentRepository`, `CredentialRepository` and `GatewayResolver`, all declared in `usecase/ports.go`. Repositories depend on an `outbox.Encoder` function, not on the `notify` package. Concrete types are chosen only in `internal/app`. |
 
 ## Key design decisions
 
@@ -82,7 +82,7 @@ returns `domain.ErrConcurrentModification`.
 re-applying the change, up to 3 attempts. Because the state machine runs
 again on fresh data, a "paid" webhook racing an "expired" sync ends with
 exactly one winner. The loser sees a final status and becomes a no-op, so
-the merchant gets exactly one notification. If the attempts run out, the API
+exactly one webhook is queued for the merchant. If the attempts run out, the API
 answers `409 concurrent_update`, and vendors simply re-send the webhook.
 
 We use optimistic rather than pessimistic locking (`SELECT ... FOR UPDATE`)
@@ -106,6 +106,36 @@ while the first is at the vendor loses the lock at the reserve step, reloads,
 sees nothing left to refund, and fails with 422 before it reaches the vendor.
 Steps 2 and 3 use `context.WithoutCancel`, so a client disconnecting
 mid-refund cannot leave a reservation behind.
+
+**Merchant webhooks go through a transactional outbox.** Sending a webhook
+straight after saving a payment has two failure modes: the process crashes
+between the save and the send, so the event is lost, or the send happens but
+the save rolls back, so the event is a lie. The outbox removes both:
+
+```
+Payment.TransitionTo / CompleteRefund   records a PaymentEvent (snapshot) on the payment
+PaymentRepository.Create / Update       BEGIN; write payment; INSERT webhook_outbox rows; COMMIT
+notify.Dispatcher (every second)        claim due rows → sign → POST → delivered / retry / dead
+```
+
+- **Events are recorded by the domain.** The use cases contain no
+  notification code at all. Any status change, from any path, produces
+  exactly one event.
+- **One transaction.** The repository writes the payment and its events
+  together. A lost optimistic lock rolls back both, so a losing update never
+  queues an event.
+- **Payload encoded at save time.** `notify.EncodeEvent` is injected as an
+  `outbox.Encoder` into the repositories. The stored body is a snapshot of
+  that moment, even if the payment changes again before delivery.
+- **Several dispatchers can run at once.** Claiming is a single
+  `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)` with a 5-minute
+  lease. If a dispatcher dies mid-batch, its messages become claimable again
+  when the lease expires.
+- **At-least-once delivery** with exponential backoff (10s doubling to a 1h
+  cap, 12 attempts), then a dead-letter state. The merchant's URL and secret
+  are read at delivery time, so retries follow configuration changes.
+- **Housekeeping:** delivered rows are purged after 7 days. Dead rows are
+  kept.
 
 **`Idempotency-Key` is HTTP middleware, not a use case.** "Replay the response
 you sent earlier" is about the API, not about payments. So it lives in
@@ -164,9 +194,12 @@ POST /webhooks/midtrans/mch_123
        ├─ gateway.ParseWebhook    verify signature, normalize status
        ├─ repo.FindByID(event.PaymentID)
        ├─ payment.TransitionTo    no-op if unchanged
-       ├─ repo.Update             version-checked; on conflict reload + retry
-       └─ notifier.Notify         async, signed, with retries
+       └─ repo.Update             one transaction: payment (version-checked) + outbox event;
+                                  on conflict reload + retry
   ← 200
+
+later, notify.Dispatcher:
+  outbox.ClaimDue → merchants.FindByID → Sender.Send (signed) → MarkDelivered | MarkFailed | MarkDead
 ```
 
 ## Testing strategy
@@ -174,7 +207,8 @@ POST /webhooks/midtrans/mch_123
 | Level | What | How |
 |---|---|---|
 | Domain | Validation, state machine, refunds | Plain table tests |
-| Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races, a second refund fired while the first is at the vendor | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
+| Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races, a second refund fired while the first is at the vendor, exactly one outbox event per real change | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
+| Dispatcher | Signed delivery, backoff timing, giving up after max attempts, merchants without a URL, the run loop | memory outbox + `httptest` merchant server + fake clock |
 | HTTP | Routing, auth, error mapping, full flow, Idempotency-Key replay/reuse/in-progress/retry-after-failure | `httptest` + real use cases + memory repos |
-| Storage | SQL correctness, migrations, optimistic locks, the idempotency store contract | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |
+| Storage | SQL correctness, migrations, optimistic locks, outbox atomicity (a losing update writes no event), the idempotency and outbox store contracts | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |

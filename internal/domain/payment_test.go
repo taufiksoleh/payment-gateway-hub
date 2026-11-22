@@ -155,3 +155,37 @@ func TestPayment_CompleteRefundAfterProviderWebhook(t *testing.T) {
 		t.Fatalf("got %+v", p)
 	}
 }
+
+func TestPayment_RecordsEventsOnRealChanges(t *testing.T) {
+	p, _ := domain.NewPayment(validParams(), now)
+	if len(p.Events()) != 0 {
+		t.Fatal("new payment should have no events")
+	}
+
+	_, _ = p.TransitionTo(domain.StatusPaid, now)
+	_, _ = p.TransitionTo(domain.StatusPaid, now) // duplicate: no event
+	_ = p.ReserveRefund(4000, now)                // internal: no event
+	_ = p.ReleaseRefund(4000, now)                // internal: no event
+	_ = p.ReserveRefund(4000, now)
+	_ = p.CompleteRefund(4000, now)
+
+	events := p.Events()
+	if len(events) != 2 || events[0].Type != "payment.paid" || events[1].Type != "payment.partially_refunded" {
+		t.Fatalf("events = %+v", events)
+	}
+	// Each event is a snapshot of that moment, not the latest state.
+	if events[0].Payment.Status != domain.StatusPaid || events[0].Payment.RefundedAmount != 0 {
+		t.Fatalf("first snapshot = %+v", events[0].Payment)
+	}
+	if events[1].Payment.RefundedAmount != 4000 {
+		t.Fatalf("second snapshot = %+v", events[1].Payment)
+	}
+	if len(events[1].Payment.Events()) != 0 {
+		t.Fatal("snapshots must not carry events")
+	}
+
+	p.ClearEvents()
+	if len(p.Events()) != 0 {
+		t.Fatal("ClearEvents did not clear")
+	}
+}

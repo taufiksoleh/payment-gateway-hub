@@ -53,6 +53,9 @@ func TestRefund_SecondRefundWhileFirstIsInFlight(t *testing.T) {
 	if got.Status != domain.StatusRefunded || got.RefundedAmount != 50000 || got.PendingRefundAmount != 0 {
 		t.Fatalf("payment = %+v", got)
 	}
+	if ev := f.events(); len(ev) != 2 || ev[0] != "payment.paid" || ev[1] != "payment.refunded" {
+		t.Fatalf("queued webhooks = %v, want [payment.paid payment.refunded]", ev)
+	}
 }
 
 func TestRefund_ProviderFailureReleasesReservation(t *testing.T) {

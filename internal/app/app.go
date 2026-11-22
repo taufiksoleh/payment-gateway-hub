@@ -19,6 +19,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/xendit"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/postgres"
@@ -32,7 +33,8 @@ type App struct {
 	cfg         config.Config
 	log         *slog.Logger
 	server      *http.Server
-	notifier    *notify.Async
+	dispatcher  *notify.Dispatcher
+	outbox      outbox.Store
 	idempotency idempotency.Store
 	db          *sql.DB // nil when running in memory
 }
@@ -55,19 +57,19 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		return nil, err
 	}
 	a.idempotency = repos.idempotency
+	a.outbox = repos.outbox
 
-	// 3. Outbound merchant webhooks: 4 attempts, 2s/4s/6s apart.
-	a.notifier = notify.NewAsync(notify.NewHTTPNotifier(nil), log, 4, 2*time.Second)
+	// 3. Merchant webhooks: payment changes land in the outbox (written by
+	//    the payment repository); the dispatcher delivers them with retries.
+	a.dispatcher = notify.NewDispatcher(repos.outbox, repos.merchants, notify.NewSender(nil), log)
 
 	// 4. Use cases.
 	merchants := usecase.NewMerchantService(repos.merchants, repos.creds, gateways)
 	payments := usecase.NewPaymentService(usecase.PaymentServiceDeps{
-		Payments:  repos.payments,
-		Merchants: repos.merchants,
-		Creds:     repos.creds,
-		Gateways:  gateways,
-		Notifier:  a.notifier,
-		Logger:    log,
+		Payments: repos.payments,
+		Creds:    repos.creds,
+		Gateways: gateways,
+		Logger:   log,
 	})
 
 	// 5. HTTP.
@@ -94,16 +96,19 @@ type repositories struct {
 	merchants   usecase.MerchantRepository
 	creds       usecase.CredentialRepository
 	idempotency idempotency.Store
+	outbox      outbox.Store
 }
 
 func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 	if a.cfg.DatabaseURL == "" {
 		a.log.Warn("DATABASE_URL not set: using in-memory storage, data is lost on restart")
+		ob := memory.NewOutbox(notify.EncodeEvent)
 		return &repositories{
-			payments:    memory.NewPaymentRepo(),
+			payments:    memory.NewPaymentRepo(ob),
 			merchants:   memory.NewMerchantRepo(),
 			creds:       memory.NewCredentialRepo(),
 			idempotency: memory.NewIdempotencyStore(),
+			outbox:      ob,
 		}, nil
 	}
 
@@ -121,16 +126,22 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 	}
 	a.db = db
 	return &repositories{
-		payments:    postgres.NewPaymentRepo(db),
+		payments:    postgres.NewPaymentRepo(db, notify.EncodeEvent),
 		merchants:   postgres.NewMerchantRepo(db),
 		creds:       postgres.NewCredentialRepo(db, cipher),
 		idempotency: postgres.NewIdempotencyStore(db),
+		outbox:      postgres.NewOutboxStore(db),
 	}, nil
 }
 
 // Run serves HTTP until ctx is cancelled, then shuts down gracefully.
 func (a *App) Run(ctx context.Context) error {
-	go a.purgeIdempotencyKeys(ctx)
+	dispatcherDone := make(chan struct{})
+	go func() {
+		defer close(dispatcherDone)
+		a.dispatcher.Run(ctx)
+	}()
+	go a.housekeeping(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -152,7 +163,12 @@ func (a *App) Run(ctx context.Context) error {
 	defer cancel()
 
 	err := a.server.Shutdown(shutdownCtx)
-	a.notifier.Wait(shutdownCtx)
+	// Let the dispatcher finish its current batch. Anything undelivered is
+	// safe in the outbox and goes out after the next start.
+	select {
+	case <-dispatcherDone:
+	case <-shutdownCtx.Done():
+	}
 	if a.db != nil {
 		if cerr := a.db.Close(); cerr != nil {
 			a.log.Warn("close database", "error", cerr)
@@ -161,10 +177,10 @@ func (a *App) Run(ctx context.Context) error {
 	return err
 }
 
-// purgeIdempotencyKeys deletes expired Idempotency-Key records every hour
-// until ctx ends. Expired keys are already ignored on lookup; this only
-// keeps the table small.
-func (a *App) purgeIdempotencyKeys(ctx context.Context) {
+// housekeeping deletes expired Idempotency-Key records and old delivered
+// webhook messages every hour until ctx ends. It only keeps tables small;
+// correctness never depends on it.
+func (a *App) housekeeping(ctx context.Context) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
@@ -172,14 +188,23 @@ func (a *App) purgeIdempotencyKeys(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			n, err := a.idempotency.Purge(ctx, now.Add(-idempotency.KeyTTL))
-			if err != nil {
-				a.log.Warn("purge idempotency keys", "error", err)
-				continue
-			}
-			if n > 0 {
-				a.log.Info("purged idempotency keys", "count", n)
-			}
+			a.purge(ctx, "idempotency keys", func() (int64, error) {
+				return a.idempotency.Purge(ctx, now.Add(-idempotency.KeyTTL))
+			})
+			a.purge(ctx, "delivered webhooks", func() (int64, error) {
+				return a.outbox.Purge(ctx, now.Add(-outbox.DeliveredRetention))
+			})
 		}
+	}
+}
+
+func (a *App) purge(ctx context.Context, what string, fn func() (int64, error)) {
+	n, err := fn()
+	if err != nil {
+		a.log.WarnContext(ctx, "purge "+what, "error", err)
+		return
+	}
+	if n > 0 {
+		a.log.InfoContext(ctx, "purged "+what, "count", n)
 	}
 }

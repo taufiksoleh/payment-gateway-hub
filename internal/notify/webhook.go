@@ -1,4 +1,8 @@
-// Package notify delivers payment updates to merchants' webhook URLs.
+// Package notify delivers payment events to merchants' webhook URLs.
+//
+// Events reach this package through the transactional outbox
+// (internal/outbox): the Dispatcher claims due messages, signs them and POSTs
+// them, retrying with backoff.
 package notify
 
 import (
@@ -15,49 +19,50 @@ import (
 	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
-	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/id"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/transport/dto"
 )
 
 // SignatureHeader carries "t=<unix seconds>,v1=<hex hmac>".
 const SignatureHeader = "X-Hub-Signature"
 
-// HTTPNotifier POSTs a signed JSON event to the merchant's webhook URL.
-type HTTPNotifier struct {
-	client *http.Client
-	now    func() time.Time
+// EncodeEvent is the outbox.Encoder for merchant webhooks: it renders the
+// public event JSON (dto.Event) for a payment event.
+func EncodeEvent(eventID string, e domain.PaymentEvent) ([]byte, error) {
+	return json.Marshal(dto.Event{
+		ID:        eventID,
+		Type:      e.Type,
+		CreatedAt: e.OccurredAt.UTC(),
+		Data:      dto.FromPayment(e.Payment),
+	})
 }
 
-// NewHTTPNotifier builds an HTTPNotifier. A nil client gets a 10s timeout.
-func NewHTTPNotifier(client *http.Client) *HTTPNotifier {
+var _ outbox.Encoder = EncodeEvent
+
+// Sender POSTs signed payloads to merchants.
+type Sender struct {
+	client *http.Client
+}
+
+// NewSender builds a Sender. A nil client gets a 10s timeout.
+func NewSender(client *http.Client) *Sender {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &HTTPNotifier{client: client, now: time.Now}
+	return &Sender{client: client}
 }
 
-// Notify sends one attempt. Any non-2xx answer is an error.
-func (n *HTTPNotifier) Notify(ctx context.Context, m domain.Merchant, p domain.Payment) error {
-	now := n.now()
-	body, err := json.Marshal(dto.Event{
-		ID:        id.New("evt"),
-		Type:      "payment." + string(p.Status),
-		CreatedAt: now.UTC(),
-		Data:      dto.FromPayment(p),
-	})
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.WebhookURL, bytes.NewReader(body))
+// Send delivers one payload. Any non-2xx answer is an error.
+func (s *Sender) Send(ctx context.Context, url, secret string, payload []byte, at time.Time) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "payment-gateway-hub")
-	req.Header.Set(SignatureHeader, Sign(m.WebhookSecret, now, body))
+	req.Header.Set(SignatureHeader, Sign(secret, at, payload))
 
-	resp, err := n.client.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
 	}

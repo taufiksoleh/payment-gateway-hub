@@ -98,6 +98,9 @@ type Payment struct {
 	// version fails with ErrConcurrentModification instead of overwriting a
 	// change it never saw.
 	Version int64
+
+	// events recorded since load, saved by the repository (see event.go).
+	events []PaymentEvent
 }
 
 // NewPaymentParams groups the inputs of NewPayment.
@@ -183,16 +186,18 @@ func (p *Payment) TransitionTo(next Status, at time.Time) (changed bool, err err
 	if next == StatusRefunded {
 		p.RefundedAmount = p.Amount
 	}
+	p.record(at)
 	return true, nil
 }
 
 // MarkFailed moves a pending payment to failed with a reason.
 func (p *Payment) MarkFailed(reason string, at time.Time) error {
-	if _, err := p.TransitionTo(StatusFailed, at); err != nil {
-		return err
+	if !p.Status.CanTransitionTo(StatusFailed) {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, p.Status, StatusFailed)
 	}
-	p.FailureReason = reason
-	return nil
+	p.FailureReason = reason // before the transition, so the event carries it
+	_, err := p.TransitionTo(StatusFailed, at)
+	return err
 }
 
 // RefundableAmount is how much can still be refunded, excluding amounts
@@ -247,6 +252,7 @@ func (p *Payment) CompleteRefund(amount int64, at time.Time) error {
 		p.RefundedAmount = p.Amount
 		p.Status = StatusRefunded
 	}
+	p.record(at)
 	return nil
 }
 

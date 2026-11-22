@@ -12,6 +12,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/gatewaytest"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/transport/httpapi"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
@@ -37,11 +38,10 @@ func newServerWithFake(t *testing.T) (*httptest.Server, *gatewaytest.Fake) {
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Merchants: usecase.NewMerchantService(merchantRepo, credRepo, registry),
 		Payments: usecase.NewPaymentService(usecase.PaymentServiceDeps{
-			Payments:  memory.NewPaymentRepo(),
-			Merchants: merchantRepo,
-			Creds:     credRepo,
-			Gateways:  registry,
-			Logger:    log,
+			Payments: memory.NewPaymentRepo(memory.NewOutbox(notify.EncodeEvent)),
+			Creds:    credRepo,
+			Gateways: registry,
+			Logger:   log,
 		}),
 		Providers:   registry.Providers(),
 		AdminToken:  adminToken,

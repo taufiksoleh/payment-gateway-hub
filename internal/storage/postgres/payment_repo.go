@@ -4,17 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/outbox"
 )
 
-// PaymentRepo implements usecase.PaymentRepository.
+// PaymentRepo implements usecase.PaymentRepository. Events recorded on a
+// payment are inserted into webhook_outbox in the same transaction as the
+// payment row (transactional outbox).
 type PaymentRepo struct {
-	db *sql.DB
+	db     *sql.DB
+	encode outbox.Encoder
 }
 
-func NewPaymentRepo(db *sql.DB) *PaymentRepo {
-	return &PaymentRepo{db: db}
+func NewPaymentRepo(db *sql.DB, encode outbox.Encoder) *PaymentRepo {
+	return &PaymentRepo{db: db, encode: encode}
 }
 
 // actionJSON is the storage shape of domain.PaymentAction. Keeping JSON tags
@@ -38,37 +43,64 @@ func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.db.ExecContext(ctx, `INSERT INTO payments (`+paymentColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
-		p.ID, p.MerchantID, p.OrderID, p.Provider, p.ProviderRef, p.Method, p.Channel,
-		p.Amount, p.Currency, p.RefundedAmount, p.Status, p.FailureReason, p.Description,
-		p.Customer.Name, p.Customer.Email, p.Customer.Phone, action,
-		nullTime(p.ExpiresAt), p.PaidAt, p.CreatedAt, p.UpdatedAt, p.Version, p.PendingRefundAmount,
-	)
-	return mapError(err)
+	msgs, err := outbox.FromEvents(r.encode, p.Events())
+	if err != nil {
+		return err
+	}
+	err = inTx(ctx, r.db, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO payments (`+paymentColumns+`)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+			p.ID, p.MerchantID, p.OrderID, p.Provider, p.ProviderRef, p.Method, p.Channel,
+			p.Amount, p.Currency, p.RefundedAmount, p.Status, p.FailureReason, p.Description,
+			p.Customer.Name, p.Customer.Email, p.Customer.Phone, action,
+			nullTime(p.ExpiresAt), p.PaidAt, p.CreatedAt, p.UpdatedAt, p.Version, p.PendingRefundAmount,
+		); err != nil {
+			return mapError(err)
+		}
+		return insertOutbox(ctx, tx, msgs)
+	})
+	if err != nil {
+		return err
+	}
+	p.ClearEvents()
+	return nil
 }
+
+// errStale signals, inside the transaction, that the version check failed.
+var errStale = errors.New("stale version")
 
 // Update saves p only if the stored version still equals p.Version (nobody
 // saved it since p was loaded), then bumps p.Version. The version check and
 // the write happen in one statement, so two concurrent updates cannot both
-// win.
+// win. Recorded events go to the outbox in the same transaction: if the
+// update loses, no event is written.
 func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 	action, err := json.Marshal(actionJSON(p.Action))
 	if err != nil {
 		return err
 	}
-	res, err := r.db.ExecContext(ctx, `UPDATE payments SET
-			provider_ref = $3, refunded_amount = $4, status = $5, failure_reason = $6,
-			action = $7, expires_at = $8, paid_at = $9, updated_at = $10,
-			pending_refund_amount = $11, version = version + 1
-		WHERE id = $1 AND version = $2`,
-		p.ID, p.Version, p.ProviderRef, p.RefundedAmount, p.Status, p.FailureReason,
-		action, nullTime(p.ExpiresAt), p.PaidAt, p.UpdatedAt, p.PendingRefundAmount,
-	)
+	msgs, err := outbox.FromEvents(r.encode, p.Events())
 	if err != nil {
-		return mapError(err)
+		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	err = inTx(ctx, r.db, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE payments SET
+				provider_ref = $3, refunded_amount = $4, status = $5, failure_reason = $6,
+				action = $7, expires_at = $8, paid_at = $9, updated_at = $10,
+				pending_refund_amount = $11, version = version + 1
+			WHERE id = $1 AND version = $2`,
+			p.ID, p.Version, p.ProviderRef, p.RefundedAmount, p.Status, p.FailureReason,
+			action, nullTime(p.ExpiresAt), p.PaidAt, p.UpdatedAt, p.PendingRefundAmount,
+		)
+		if err != nil {
+			return mapError(err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errStale
+		}
+		return insertOutbox(ctx, tx, msgs)
+	})
+	if errors.Is(err, errStale) {
 		// Either the row is gone or someone else bumped the version.
 		var exists bool
 		if err := r.db.QueryRowContext(ctx,
@@ -81,7 +113,11 @@ func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 		}
 		return domain.ErrConcurrentModification
 	}
+	if err != nil {
+		return err
+	}
 	p.Version++
+	p.ClearEvents()
 	return nil
 }
 

@@ -4,46 +4,47 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync"
 	"testing"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/gatewaytest"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
 const fakeProvider domain.Provider = "fake"
 
-// recordingNotifier remembers every notification.
-type recordingNotifier struct {
-	mu     sync.Mutex
-	events []domain.Payment
-}
-
-func (n *recordingNotifier) Notify(_ context.Context, _ domain.Merchant, p domain.Payment) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.events = append(n.events, p)
-	return nil
-}
-
 type fixture struct {
 	payments *usecase.PaymentService
 	fake     *gatewaytest.Fake
-	notifier *recordingNotifier
+	outbox   *memory.Outbox // merchant notifications land here
 	merchant *domain.Merchant
+}
+
+// events returns the types of every webhook queued in the outbox.
+func (f *fixture) events() []string {
+	var types []string
+	for _, m := range f.outbox.Messages() {
+		types = append(types, m.Type)
+	}
+	return types
 }
 
 func setup(t *testing.T, gw ...gateway.Gateway) *fixture {
 	t.Helper()
-	return setupWithRepo(t, memory.NewPaymentRepo(), gw...)
+	return setupWithRepo(t, func(ob *memory.Outbox) usecase.PaymentRepository {
+		return memory.NewPaymentRepo(ob)
+	}, gw...)
 }
 
-func setupWithRepo(t *testing.T, paymentRepo usecase.PaymentRepository, gw ...gateway.Gateway) *fixture {
+// setupWithRepo lets a test wrap the payment repository; newRepo receives the
+// outbox the repository must write events to.
+func setupWithRepo(t *testing.T, newRepo func(*memory.Outbox) usecase.PaymentRepository, gw ...gateway.Gateway) *fixture {
 	t.Helper()
 	ctx := context.Background()
+	ob := memory.NewOutbox(notify.EncodeEvent)
 
 	fake := gatewaytest.New(fakeProvider)
 	if len(gw) == 0 {
@@ -53,7 +54,6 @@ func setupWithRepo(t *testing.T, paymentRepo usecase.PaymentRepository, gw ...ga
 
 	merchantRepo := memory.NewMerchantRepo()
 	credRepo := memory.NewCredentialRepo()
-	notifier := &recordingNotifier{}
 
 	merchants := usecase.NewMerchantService(merchantRepo, credRepo, registry)
 	reg, err := merchants.Register(ctx, usecase.RegisterMerchantInput{Name: "Toko", WebhookURL: "https://toko.example/hook"})
@@ -69,13 +69,11 @@ func setupWithRepo(t *testing.T, paymentRepo usecase.PaymentRepository, gw ...ga
 	}
 
 	payments := usecase.NewPaymentService(usecase.PaymentServiceDeps{
-		Payments:  paymentRepo,
-		Merchants: merchantRepo,
-		Creds:     credRepo,
-		Gateways:  registry,
-		Notifier:  notifier,
+		Payments: newRepo(ob),
+		Creds:    credRepo,
+		Gateways: registry,
 	})
-	return &fixture{payments: payments, fake: fake, notifier: notifier, merchant: reg.Merchant}
+	return &fixture{payments: payments, fake: fake, outbox: ob, merchant: reg.Merchant}
 }
 
 func createInput(orderID string) usecase.CreatePaymentInput {
@@ -158,8 +156,8 @@ func TestHandleWebhook_UpdatesAndNotifiesOnce(t *testing.T) {
 	if got.Status != domain.StatusPaid {
 		t.Fatalf("status = %s, want paid", got.Status)
 	}
-	if len(f.notifier.events) != 1 {
-		t.Fatalf("notified %d times, want 1", len(f.notifier.events))
+	if ev := f.events(); len(ev) != 1 || ev[0] != "payment.paid" {
+		t.Fatalf("queued webhooks = %v, want exactly one payment.paid", ev)
 	}
 }
 

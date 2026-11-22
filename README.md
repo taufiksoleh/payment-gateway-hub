@@ -22,7 +22,7 @@ merchant's own vendor account.
 - Unified status: `pending → paid / failed / expired / cancelled → partially_refunded / refunded`
 - Merchants bring their own vendor accounts. Credentials are AES-256-GCM encrypted at rest
 - Verified vendor webhooks (Midtrans SHA-512, Xendit callback token, DOKU HMAC-SHA256)
-- Signed outbound webhooks to merchants (`X-Hub-Signature`), with retries
+- Signed outbound webhooks to merchants (`X-Hub-Signature`), delivered through a transactional outbox: never lost on a crash, retried with exponential backoff
 - Idempotent payment creation per `order_id`
 - Optimistic locking on payments: concurrent webhooks, syncs and refunds never overwrite each other
 - Double-refund protection: the refund amount is reserved before the vendor is called
@@ -151,6 +151,13 @@ Each webhook carries `X-Hub-Signature: t=<unix>,v1=<hex>`. To verify it:
 2. Reject any request where `t` is more than about 5 minutes old.
 
 Event body: `{"id","type":"payment.paid","created_at","data":{...payment}}`.
+`data` is the payment as it was right after the change.
+
+**Delivery guarantees:**
+- **At least once.** The same event can arrive more than once (for example if your endpoint answers slowly), so de-duplicate on `id`. Retries carry the same `id` and body.
+- **Retries:** any non-2xx answer or timeout (10 seconds) is retried with exponential backoff: 10s, 20s, 40s and so on, capped at 1 hour. After 12 attempts (about 5 hours) the event is marked dead and kept for inspection in `webhook_outbox`.
+- **Ordering is not guaranteed** while retries are happening. Use `data.updated_at` or `created_at` to order events, or re-fetch the payment.
+- **No webhook URL:** if your merchant account has no `webhook_url`, events are settled without being sent.
 
 ## Project layout
 
@@ -168,7 +175,8 @@ internal/
   transport/
     httpapi/             REST handlers, middleware, error mapping
     dto/                 public JSON shapes (API + outbound webhooks)
-  notify/                outbound merchant webhooks (HTTP + async retry decorator)
+  outbox/                transactional outbox: message, store port, retry policy (+ contract test)
+  notify/                event encoding, signing, and the dispatcher that delivers the outbox
   idempotency/           Idempotency-Key record + store port (+ contract test)
   platform/              small utilities: id generation, encryption
   config/                environment variables
@@ -206,7 +214,7 @@ TEST_DATABASE_URL='postgres://hub:hub@localhost:5432/hub?sslmode=disable' go tes
 This is a solid foundation, not yet production-certified. Before going live:
 
 - **Verify each adapter against the vendor sandbox.** The request and response shapes follow vendor documentation and are covered by tests against recorded-style responses. They have not yet been run against live sandbox accounts.
-- **Merchant webhook delivery** is in-process with retries. Deliveries in flight are lost if the process crashes. Use a transactional outbox table for guaranteed delivery.
+- **Dead webhooks** are only visible in the `webhook_outbox` table (`dead_at IS NOT NULL`). There is no API yet to list or replay them.
 - **Xendit refunds** are asynchronous on Xendit's side. The hub marks a refund done once Xendit accepts it.
 - **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
 - **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.
