@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency/idempotencytest"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/postgres"
 	"github.com/taufiksoleh/payment-gateway-hub/migrations"
@@ -50,6 +51,10 @@ func TestRepositories(t *testing.T) {
 	if err := merchants.Create(ctx, m); err != nil {
 		t.Fatal(err)
 	}
+
+	t.Run("idempotency store contract", func(t *testing.T) {
+		idempotencytest.RunStoreContract(t, postgres.NewIdempotencyStore(db), m.ID)
+	})
 	if got, err := merchants.FindByAPIKeyHash(ctx, m.APIKeyHash); err != nil || got.ID != m.ID {
 		t.Fatalf("find merchant: %v", err)
 	}

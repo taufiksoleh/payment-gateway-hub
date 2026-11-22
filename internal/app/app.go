@@ -17,6 +17,7 @@ import (
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/doku"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/midtrans"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway/xendit"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/notify"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/platform/secret"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/storage/memory"
@@ -28,11 +29,12 @@ import (
 
 // App is a fully wired hub.
 type App struct {
-	cfg      config.Config
-	log      *slog.Logger
-	server   *http.Server
-	notifier *notify.Async
-	db       *sql.DB // nil when running in memory
+	cfg         config.Config
+	log         *slog.Logger
+	server      *http.Server
+	notifier    *notify.Async
+	idempotency idempotency.Store
+	db          *sql.DB // nil when running in memory
 }
 
 // New builds every dependency from cfg.
@@ -52,6 +54,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	if err != nil {
 		return nil, err
 	}
+	a.idempotency = repos.idempotency
 
 	// 3. Outbound merchant webhooks: 4 attempts, 2s/4s/6s apart.
 	a.notifier = notify.NewAsync(notify.NewHTTPNotifier(nil), log, 4, 2*time.Second)
@@ -71,11 +74,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	a.server = &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			Payments:   payments,
-			Merchants:  merchants,
-			Providers:  gateways.Providers(),
-			AdminToken: cfg.AdminToken,
-			Logger:     log,
+			Payments:    payments,
+			Merchants:   merchants,
+			Providers:   gateways.Providers(),
+			AdminToken:  cfg.AdminToken,
+			Idempotency: repos.idempotency,
+			Logger:      log,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -86,18 +90,20 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 }
 
 type repositories struct {
-	payments  usecase.PaymentRepository
-	merchants usecase.MerchantRepository
-	creds     usecase.CredentialRepository
+	payments    usecase.PaymentRepository
+	merchants   usecase.MerchantRepository
+	creds       usecase.CredentialRepository
+	idempotency idempotency.Store
 }
 
 func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 	if a.cfg.DatabaseURL == "" {
 		a.log.Warn("DATABASE_URL not set: using in-memory storage, data is lost on restart")
 		return &repositories{
-			payments:  memory.NewPaymentRepo(),
-			merchants: memory.NewMerchantRepo(),
-			creds:     memory.NewCredentialRepo(),
+			payments:    memory.NewPaymentRepo(),
+			merchants:   memory.NewMerchantRepo(),
+			creds:       memory.NewCredentialRepo(),
+			idempotency: memory.NewIdempotencyStore(),
 		}, nil
 	}
 
@@ -115,14 +121,17 @@ func (a *App) buildRepositories(ctx context.Context) (*repositories, error) {
 	}
 	a.db = db
 	return &repositories{
-		payments:  postgres.NewPaymentRepo(db),
-		merchants: postgres.NewMerchantRepo(db),
-		creds:     postgres.NewCredentialRepo(db, cipher),
+		payments:    postgres.NewPaymentRepo(db),
+		merchants:   postgres.NewMerchantRepo(db),
+		creds:       postgres.NewCredentialRepo(db, cipher),
+		idempotency: postgres.NewIdempotencyStore(db),
 	}, nil
 }
 
 // Run serves HTTP until ctx is cancelled, then shuts down gracefully.
 func (a *App) Run(ctx context.Context) error {
+	go a.purgeIdempotencyKeys(ctx)
+
 	errCh := make(chan error, 1)
 	go func() {
 		a.log.Info("http server listening", "addr", a.cfg.HTTPAddr)
@@ -150,4 +159,27 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 	return err
+}
+
+// purgeIdempotencyKeys deletes expired Idempotency-Key records every hour
+// until ctx ends. Expired keys are already ignored on lookup; this only
+// keeps the table small.
+func (a *App) purgeIdempotencyKeys(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			n, err := a.idempotency.Purge(ctx, now.Add(-idempotency.KeyTTL))
+			if err != nil {
+				a.log.Warn("purge idempotency keys", "error", err)
+				continue
+			}
+			if n > 0 {
+				a.log.Info("purged idempotency keys", "count", n)
+			}
+		}
+	}
 }

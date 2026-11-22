@@ -21,7 +21,15 @@ const adminToken = "admin-secret"
 
 func newServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	registry := gateway.NewRegistry(gatewaytest.New("fake"))
+	srv, _ := newServerWithFake(t)
+	return srv
+}
+
+// newServerWithFake also returns the fake gateway so tests can steer it.
+func newServerWithFake(t *testing.T) (*httptest.Server, *gatewaytest.Fake) {
+	t.Helper()
+	fake := gatewaytest.New("fake")
+	registry := gateway.NewRegistry(fake)
 	merchantRepo := memory.NewMerchantRepo()
 	credRepo := memory.NewCredentialRepo()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -35,12 +43,13 @@ func newServer(t *testing.T) *httptest.Server {
 			Gateways:  registry,
 			Logger:    log,
 		}),
-		Providers:  registry.Providers(),
-		AdminToken: adminToken,
-		Logger:     log,
+		Providers:   registry.Providers(),
+		AdminToken:  adminToken,
+		Idempotency: memory.NewIdempotencyStore(),
+		Logger:      log,
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, fake
 }
 
 // call sends a JSON request and decodes the JSON response into out.

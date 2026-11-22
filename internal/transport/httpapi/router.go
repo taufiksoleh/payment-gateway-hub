@@ -9,6 +9,7 @@ import (
 
 	"github.com/taufiksoleh/payment-gateway-hub/internal/domain"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/gateway"
+	"github.com/taufiksoleh/payment-gateway-hub/internal/idempotency"
 	"github.com/taufiksoleh/payment-gateway-hub/internal/usecase"
 )
 
@@ -33,11 +34,12 @@ type MerchantUsecase interface {
 
 // Deps are the router's dependencies.
 type Deps struct {
-	Payments   PaymentUsecase
-	Merchants  MerchantUsecase
-	Providers  []domain.Provider // for GET /v1/providers
-	AdminToken string            // protects merchant registration
-	Logger     *slog.Logger
+	Payments    PaymentUsecase
+	Merchants   MerchantUsecase
+	Providers   []domain.Provider // for GET /v1/providers
+	AdminToken  string            // protects merchant registration
+	Idempotency idempotency.Store // backs the Idempotency-Key header
+	Logger      *slog.Logger
 }
 
 // NewRouter builds the HTTP handler with every route and middleware.
@@ -45,6 +47,10 @@ func NewRouter(d Deps) http.Handler {
 	h := &handlers{payments: d.Payments, merchants: d.Merchants, providers: d.Providers, log: d.Logger}
 	merchant := requireMerchant(d.Merchants)
 	admin := requireAdmin(d.AdminToken)
+	idem := idempotent(d.Idempotency, d.Logger)
+
+	// Money-moving routes accept an Idempotency-Key header.
+	merchantIdem := func(fn http.HandlerFunc) http.Handler { return merchant(idem(fn)) }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
@@ -59,10 +65,10 @@ func NewRouter(d Deps) http.Handler {
 	mux.Handle("DELETE /v1/gateways/{provider}", merchant(http.HandlerFunc(h.deleteGateway)))
 
 	// Merchant: payments
-	mux.Handle("POST /v1/payments", merchant(http.HandlerFunc(h.createPayment)))
+	mux.Handle("POST /v1/payments", merchantIdem(h.createPayment))
 	mux.Handle("GET /v1/payments/{id}", merchant(http.HandlerFunc(h.getPayment)))
 	mux.Handle("POST /v1/payments/{id}/sync", merchant(http.HandlerFunc(h.syncPayment)))
-	mux.Handle("POST /v1/payments/{id}/refunds", merchant(http.HandlerFunc(h.refundPayment)))
+	mux.Handle("POST /v1/payments/{id}/refunds", merchantIdem(h.refundPayment))
 
 	// Provider callbacks (authenticated by provider signature)
 	mux.HandleFunc("POST /webhooks/{provider}/{merchantID}", h.providerWebhook)

@@ -26,6 +26,7 @@ merchant's own vendor account.
 - Idempotent payment creation per `order_id`
 - Optimistic locking on payments: concurrent webhooks, syncs and refunds never overwrite each other
 - Double-refund protection: the refund amount is reserved before the vendor is called
+- `Idempotency-Key` header on payment and refund creation, so client retries never charge or refund twice
 - Plain Go: standard library router, `database/sql`, `log/slog`. One external dependency (pgx)
 
 ## Supported channels
@@ -110,6 +111,30 @@ curl -s localhost:8080/v1/payments/pay_... -H "Authorization: Bearer $API_KEY"
 
 Errors always look like `{"error": {"code": "...", "message": "...", "field": "..."}}`.
 
+### Safe retries with `Idempotency-Key`
+
+`POST /v1/payments` and `POST /v1/payments/{id}/refunds` accept an
+`Idempotency-Key` header: any unique string up to 255 printable characters,
+such as a UUID. Generate one per operation and reuse it when you retry that
+same operation, for example after a timeout.
+
+```bash
+curl -s -X POST localhost:8080/v1/payments/pay_.../refunds \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Idempotency-Key: 6f1c2a0e-refund-INV-2026-0001" \
+  -d '{"amount": 50000, "reason": "customer request"}'
+```
+
+| Situation | Response |
+|---|---|
+| First request with this key | Processed normally |
+| Same key and body, first one succeeded | The stored response, with the header `Idempotent-Replayed: true` |
+| Same key and body, first one still running | `409 idempotency_in_progress`. Retry shortly |
+| Same key, different body or endpoint | `422 idempotency_key_reused` |
+| Same key, first one failed (non-2xx) | Processed again, because failures are not stored |
+
+Keys belong to one merchant and are remembered for 24 hours.
+
 ### Vendor credentials
 
 | Provider | `secrets` keys |
@@ -144,6 +169,7 @@ internal/
     httpapi/             REST handlers, middleware, error mapping
     dto/                 public JSON shapes (API + outbound webhooks)
   notify/                outbound merchant webhooks (HTTP + async retry decorator)
+  idempotency/           Idempotency-Key record + store port (+ contract test)
   platform/              small utilities: id generation, encryption
   config/                environment variables
   app/                   composition root: wires everything
@@ -183,6 +209,6 @@ This is a solid foundation, not yet production-certified. Before going live:
 - **Merchant webhook delivery** is in-process with retries. Deliveries in flight are lost if the process crashes. Use a transactional outbox table for guaranteed delivery.
 - **Xendit refunds** are asynchronous on Xendit's side. The hub marks a refund done once Xendit accepts it.
 - **Refund reconciliation:** if the process crashes between the vendor accepting a refund and the hub recording it, the amount stays in `pending_refund_amount`. It can't be refunded twice, but it needs a manual check against the vendor dashboard.
-- **Client retries:** the refund endpoint has no `Idempotency-Key` yet. A client that retries after a timeout can refund again, up to the amount still refundable. Concurrent requests for the same money are already blocked. Two simultaneous `POST /v1/payments` with the same `order_id` can still both reach the vendor before the database rejects the second one.
+- **Retries without `Idempotency-Key`:** the header is optional. A client that retries a refund *without* it can refund again, up to the amount still refundable. Two simultaneous `POST /v1/payments` with the same `order_id` and no key can both reach the vendor before the database rejects the second one.
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.
 - **Not yet built:** listing payments, rate limiting, API key rotation, metrics.

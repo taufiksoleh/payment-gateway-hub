@@ -107,6 +107,28 @@ sees nothing left to refund, and fails with 422 before it reaches the vendor.
 Steps 2 and 3 use `context.WithoutCancel`, so a client disconnecting
 mid-refund cannot leave a reservation behind.
 
+**`Idempotency-Key` is HTTP middleware, not a use case.** "Replay the response
+you sent earlier" is about the API, not about payments. So it lives in
+`httpapi/idempotency.go`, wraps the two routes that move money, and leaves
+the use cases untouched. Its storage port is `idempotency.Store`, kept in
+its own package so the `postgres` and `memory` adapters can implement it
+without importing `httpapi`.
+
+The middleware:
+
+1. Claims the key atomically (`INSERT ... ON CONFLICT DO UPDATE WHERE`
+   abandoned or expired). Exactly one concurrent request wins.
+2. Runs the handler into a buffer.
+3. Stores the response if it is 2xx, otherwise releases the key, then sends
+   the response.
+
+Each claim carries a random token. If a request is presumed dead after 5
+minutes and its key is taken over, the original request cannot overwrite its
+successor if it finishes late. Only successes are stored: a failed attempt
+changed nothing a retry could duplicate, and refund reservations already
+guard the one case where it might have. The same contract test
+(`idempotencytest.RunStoreContract`) runs against both stores.
+
 **Domain types have no JSON tags.** Wire formats live in `transport/dto`
 (public API), in each vendor package (vendor API), and in `postgres`
 (storage). Renaming a JSON field never touches business code.
@@ -154,5 +176,5 @@ POST /webhooks/midtrans/mch_123
 | Domain | Validation, state machine, refunds | Plain table tests |
 | Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races, a second refund fired while the first is at the vendor | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
-| HTTP | Routing, auth, error mapping, full flow | `httptest` + real use cases + memory repos |
-| Storage | SQL correctness, migrations | Real PostgreSQL, gated by `TEST_DATABASE_URL` |
+| HTTP | Routing, auth, error mapping, full flow, Idempotency-Key replay/reuse/in-progress/retry-after-failure | `httptest` + real use cases + memory repos |
+| Storage | SQL correctness, migrations, optimistic locks, the idempotency store contract | Real PostgreSQL, gated by `TEST_DATABASE_URL`; the same contract also runs on the memory store |
