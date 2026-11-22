@@ -40,8 +40,9 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, provider domain.Prov
 	if p.MerchantID != merchantID || p.Provider != provider {
 		return fmt.Errorf("%w: payment %s does not belong to this webhook", domain.ErrNotFound, p.ID)
 	}
-	if p.ProviderRef == "" && event.ProviderRef != "" {
-		p.ProviderRef = event.ProviderRef
-	}
-	return s.applyStatus(ctx, p, event.Status, event.PaidAt)
+	return s.applyStatus(ctx, p, statusUpdate{
+		Status:      event.Status,
+		PaidAt:      event.PaidAt,
+		ProviderRef: event.ProviderRef,
+	})
 }

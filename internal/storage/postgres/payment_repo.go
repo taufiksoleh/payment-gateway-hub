@@ -31,7 +31,7 @@ type actionJSON struct {
 const paymentColumns = `id, merchant_id, order_id, provider, provider_ref, method, channel,
 	amount, currency, refunded_amount, status, failure_reason, description,
 	customer_name, customer_email, customer_phone, action,
-	expires_at, paid_at, created_at, updated_at`
+	expires_at, paid_at, created_at, updated_at, version`
 
 func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 	action, err := json.Marshal(actionJSON(p.Action))
@@ -39,33 +39,49 @@ func (r *PaymentRepo) Create(ctx context.Context, p *domain.Payment) error {
 		return err
 	}
 	_, err = r.db.ExecContext(ctx, `INSERT INTO payments (`+paymentColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
 		p.ID, p.MerchantID, p.OrderID, p.Provider, p.ProviderRef, p.Method, p.Channel,
 		p.Amount, p.Currency, p.RefundedAmount, p.Status, p.FailureReason, p.Description,
 		p.Customer.Name, p.Customer.Email, p.Customer.Phone, action,
-		nullTime(p.ExpiresAt), p.PaidAt, p.CreatedAt, p.UpdatedAt,
+		nullTime(p.ExpiresAt), p.PaidAt, p.CreatedAt, p.UpdatedAt, p.Version,
 	)
 	return mapError(err)
 }
 
+// Update saves p only if the stored version still equals p.Version (nobody
+// saved it since p was loaded), then bumps p.Version. The version check and
+// the write happen in one statement, so two concurrent updates cannot both
+// win.
 func (r *PaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 	action, err := json.Marshal(actionJSON(p.Action))
 	if err != nil {
 		return err
 	}
 	res, err := r.db.ExecContext(ctx, `UPDATE payments SET
-			provider_ref = $2, refunded_amount = $3, status = $4, failure_reason = $5,
-			action = $6, expires_at = $7, paid_at = $8, updated_at = $9
-		WHERE id = $1`,
-		p.ID, p.ProviderRef, p.RefundedAmount, p.Status, p.FailureReason,
+			provider_ref = $3, refunded_amount = $4, status = $5, failure_reason = $6,
+			action = $7, expires_at = $8, paid_at = $9, updated_at = $10,
+			version = version + 1
+		WHERE id = $1 AND version = $2`,
+		p.ID, p.Version, p.ProviderRef, p.RefundedAmount, p.Status, p.FailureReason,
 		action, nullTime(p.ExpiresAt), p.PaidAt, p.UpdatedAt,
 	)
 	if err != nil {
 		return mapError(err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return domain.ErrNotFound
+		// Either the row is gone or someone else bumped the version.
+		var exists bool
+		if err := r.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM payments WHERE id = $1)`, p.ID,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return domain.ErrNotFound
+		}
+		return domain.ErrConcurrentModification
 	}
+	p.Version++
 	return nil
 }
 
@@ -92,7 +108,7 @@ func scanPayment(row *sql.Row) (*domain.Payment, error) {
 		&p.ID, &p.MerchantID, &p.OrderID, &p.Provider, &p.ProviderRef, &p.Method, &p.Channel,
 		&p.Amount, &p.Currency, &p.RefundedAmount, &p.Status, &p.FailureReason, &p.Description,
 		&p.Customer.Name, &p.Customer.Email, &p.Customer.Phone, &action,
-		&expiresAt, &paidAt, &p.CreatedAt, &p.UpdatedAt,
+		&expiresAt, &paidAt, &p.CreatedAt, &p.UpdatedAt, &p.Version,
 	)
 	if err != nil {
 		return nil, mapError(err)

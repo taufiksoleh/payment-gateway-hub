@@ -19,6 +19,10 @@ var (
 	ErrUnsupported       = errors.New("unsupported")
 	ErrInvalidSignature  = errors.New("invalid signature")
 	ErrProvider          = errors.New("payment provider error")
+
+	// ErrConcurrentModification means another request saved the same record
+	// first (optimistic lock lost). Reload and try again.
+	ErrConcurrentModification = errors.New("concurrent modification")
 )
 
 // ValidationError reports which field is wrong and why. It matches

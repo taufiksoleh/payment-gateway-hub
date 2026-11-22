@@ -33,12 +33,19 @@ func (r *PaymentRepo) Create(_ context.Context, p *domain.Payment) error {
 	return nil
 }
 
+// Update saves p only if nobody saved it since p was loaded (same Version),
+// then bumps p.Version.
 func (r *PaymentRepo) Update(_ context.Context, p *domain.Payment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byID[p.ID]; !ok {
+	current, ok := r.byID[p.ID]
+	if !ok {
 		return domain.ErrNotFound
 	}
+	if current.Version != p.Version {
+		return domain.ErrConcurrentModification
+	}
+	p.Version++
 	r.byID[p.ID] = *p
 	return nil
 }

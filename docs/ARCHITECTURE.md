@@ -71,6 +71,24 @@ status. Repeating the current status is a no-op, which makes duplicate
 webhooks harmless. Invalid moves (for example `paid → pending`) are rejected,
 and the use case logs and ignores them.
 
+**Optimistic locking on payments.** Webhooks, `/sync` and refunds can touch
+the same payment at the same moment (vendors often retry webhooks while a
+merchant is polling). Each payment has a `version`. `PaymentRepository.Update`
+only writes if the stored version still matches the one that was read
+(`UPDATE ... WHERE id = $1 AND version = $2`) and bumps it. Otherwise it
+returns `domain.ErrConcurrentModification`.
+
+`PaymentService.update` handles that error by reloading the payment and
+re-applying the change, up to 3 attempts. Because the state machine runs
+again on fresh data, a "paid" webhook racing an "expired" sync ends with
+exactly one winner. The loser sees a final status and becomes a no-op, so
+the merchant gets exactly one notification. If the attempts run out, the API
+answers `409 concurrent_update`, and vendors simply re-send the webhook.
+
+We use optimistic rather than pessimistic locking (`SELECT ... FOR UPDATE`)
+because vendor calls happen outside any transaction, conflicts are rare, and
+it keeps repositories free of transaction plumbing.
+
 **Domain types have no JSON tags.** Wire formats live in `transport/dto`
 (public API), in each vendor package (vendor API), and in `postgres`
 (storage). Renaming a JSON field never touches business code.
@@ -106,7 +124,7 @@ POST /webhooks/midtrans/mch_123
        ├─ gateway.ParseWebhook    verify signature, normalize status
        ├─ repo.FindByID(event.PaymentID)
        ├─ payment.TransitionTo    no-op if unchanged
-       ├─ repo.Update
+       ├─ repo.Update             version-checked; on conflict reload + retry
        └─ notifier.Notify         async, signed, with retries
   ← 200
 ```
@@ -116,7 +134,7 @@ POST /webhooks/midtrans/mch_123
 | Level | What | How |
 |---|---|---|
 | Domain | Validation, state machine, refunds | Plain table tests |
-| Use case | Idempotency, webhook flow, ownership, refunds | `memory` repos + `gatewaytest.Fake` |
+| Use case | Idempotency, webhook flow, ownership, refunds, lock conflicts and races | `memory` repos + `gatewaytest.Fake`; a repo wrapper that injects a competing write; 40 concurrent goroutines |
 | Adapter | Exact vendor wire format, signatures | `httptest.Server` pretending to be the vendor |
 | HTTP | Routing, auth, error mapping, full flow | `httptest` + real use cases + memory repos |
 | Storage | SQL correctness, migrations | Real PostgreSQL, gated by `TEST_DATABASE_URL` |

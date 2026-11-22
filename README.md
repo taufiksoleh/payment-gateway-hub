@@ -24,6 +24,7 @@ merchant's own vendor account.
 - Verified vendor webhooks (Midtrans SHA-512, Xendit callback token, DOKU HMAC-SHA256)
 - Signed outbound webhooks to merchants (`X-Hub-Signature`), with retries
 - Idempotent payment creation per `order_id`
+- Optimistic locking on payments: concurrent webhooks, syncs and refunds never overwrite each other
 - Plain Go: standard library router, `database/sql`, `log/slog`. One external dependency (pgx)
 
 ## Supported channels
@@ -178,7 +179,6 @@ TEST_DATABASE_URL='postgres://hub:hub@localhost:5432/hub?sslmode=disable' go tes
 This is a solid foundation, not yet production-certified. Before going live:
 
 - **Verify each adapter against the vendor sandbox.** The request and response shapes follow vendor documentation and are covered by tests against recorded-style responses. They have not yet been run against live sandbox accounts.
-- **Concurrent updates:** a webhook and a `/sync` racing on the same payment use last-write-wins. Add optimistic locking (a `version` column) if that matters to you.
 - **Merchant webhook delivery** is in-process with retries. Deliveries in flight are lost if the process crashes. Use a transactional outbox table for guaranteed delivery.
 - **Xendit refunds** are asynchronous on Xendit's side. The hub marks a refund done once Xendit accepts it.
 - **Midtrans cards** need client-side tokenization (Snap/JS) and are not supported. The Midtrans Mandiri VA (`echannel`) is not mapped yet.

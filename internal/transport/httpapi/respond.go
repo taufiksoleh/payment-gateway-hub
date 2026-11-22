@@ -45,6 +45,9 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code, msg = http.StatusUnprocessableEntity, "invalid_input", err.Error()
 	case errors.Is(err, domain.ErrNotFound):
 		status, code, msg = http.StatusNotFound, "not_found", "resource not found"
+	case errors.Is(err, domain.ErrConcurrentModification):
+		// Retryable: providers re-send webhooks on non-2xx, clients may retry.
+		status, code, msg = http.StatusConflict, "concurrent_update", "payment was updated concurrently, retry the request"
 	case errors.Is(err, domain.ErrConflict):
 		status, code, msg = http.StatusConflict, "conflict", err.Error()
 	case errors.Is(err, domain.ErrUnauthorized):

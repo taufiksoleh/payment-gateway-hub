@@ -87,6 +87,12 @@ type Payment struct {
 	PaidAt    *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// Version is for optimistic locking. It starts at 1 and the repository
+	// increments it on every successful Update. An Update carrying an older
+	// version fails with ErrConcurrentModification instead of overwriting a
+	// change it never saw.
+	Version int64
 }
 
 // NewPaymentParams groups the inputs of NewPayment.
@@ -147,6 +153,7 @@ func NewPayment(p NewPaymentParams, now time.Time) (*Payment, error) {
 		Description: p.Description,
 		Customer:    p.Customer,
 		ExpiresAt:   p.ExpiresAt,
+		Version:     1,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}, nil

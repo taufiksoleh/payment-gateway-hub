@@ -80,15 +80,31 @@ func TestRepositories(t *testing.T) {
 		t.Fatalf("duplicate order id: got %v, want ErrConflict", err)
 	}
 
+	stale, _ := payments.FindByID(ctx, p.ID)
+
 	_, _ = p.TransitionTo(domain.StatusPaid, now)
 	if err := payments.Update(ctx, p); err != nil {
 		t.Fatal(err)
+	}
+	if p.Version != 2 {
+		t.Fatalf("version = %d, want 2", p.Version)
+	}
+
+	// A writer holding the old version must not overwrite "paid".
+	_, _ = stale.TransitionTo(domain.StatusExpired, now)
+	if err := payments.Update(ctx, stale); !errors.Is(err, domain.ErrConcurrentModification) {
+		t.Fatalf("stale update: got %v, want ErrConcurrentModification", err)
+	}
+	ghost := *p
+	ghost.ID = "pay_missing_" + suffix
+	if err := payments.Update(ctx, &ghost); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing row: got %v, want ErrNotFound", err)
 	}
 	got, err := payments.FindByOrderID(ctx, m.ID, "order-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != domain.StatusPaid || got.PaidAt == nil || got.Action.QRString != "000201..." {
+	if got.Status != domain.StatusPaid || got.PaidAt == nil || got.Action.QRString != "000201..." || got.Version != 2 {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 }

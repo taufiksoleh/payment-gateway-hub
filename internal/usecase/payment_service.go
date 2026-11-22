@@ -170,7 +170,7 @@ func (s *PaymentService) Sync(ctx context.Context, merchantID, paymentID string)
 	if err != nil {
 		return nil, fmt.Errorf("get status from %s: %w", p.Provider, err)
 	}
-	if err := s.applyStatus(ctx, p, res.Status, res.PaidAt); err != nil {
+	if err := s.applyStatus(ctx, p, statusUpdate{Status: res.Status, PaidAt: res.PaidAt}); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -214,11 +214,14 @@ func (s *PaymentService) Refund(ctx context.Context, merchantID, paymentID strin
 		return nil, fmt.Errorf("refund at %s: %w", p.Provider, err)
 	}
 
-	if err := p.ApplyRefund(in.Amount, s.now()); err != nil {
+	_, err = s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+		return true, p.ApplyRefund(in.Amount, s.now())
+	})
+	if err != nil {
+		// The provider already returned the money; flag it for reconciliation.
+		s.log.ErrorContext(ctx, "refund accepted by provider but not recorded",
+			"payment_id", p.ID, "amount", in.Amount, "error", err)
 		return nil, err
-	}
-	if err := s.payments.Update(ctx, p); err != nil {
-		return nil, fmt.Errorf("save payment: %w", err)
 	}
 	s.notify(ctx, p)
 	return p, nil
@@ -240,11 +243,30 @@ func (s *PaymentService) gatewayFor(ctx context.Context, merchantID string, prov
 	return gw, cred, nil
 }
 
-// applyStatus moves p to status, saves it and notifies the merchant when it
-// actually changed. Invalid transitions (e.g. a late "pending" webhook after
-// "paid") are logged and ignored.
-func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, status domain.Status, paidAt *time.Time) error {
-	changed, err := p.TransitionTo(status, s.now())
+// statusUpdate is a status reported by a provider (webhook or sync).
+type statusUpdate struct {
+	Status      domain.Status
+	PaidAt      *time.Time
+	ProviderRef string
+}
+
+// applyStatus moves p to the reported status, saves it and notifies the
+// merchant when it actually changed. Invalid transitions (e.g. a late
+// "pending" webhook after "paid") are logged and ignored.
+func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, u statusUpdate) error {
+	changed, err := s.update(ctx, p, func(p *domain.Payment) (bool, error) {
+		if p.ProviderRef == "" && u.ProviderRef != "" {
+			p.ProviderRef = u.ProviderRef
+		}
+		changed, err := p.TransitionTo(u.Status, s.now())
+		if err != nil || !changed {
+			return false, err
+		}
+		if u.PaidAt != nil && u.Status == domain.StatusPaid {
+			p.PaidAt = u.PaidAt
+		}
+		return true, nil
+	})
 	if errors.Is(err, domain.ErrInvalidTransition) {
 		s.log.InfoContext(ctx, "ignoring status update", "payment_id", p.ID, "error", err)
 		return nil
@@ -252,14 +274,44 @@ func (s *PaymentService) applyStatus(ctx context.Context, p *domain.Payment, sta
 	if err != nil || !changed {
 		return err
 	}
-	if paidAt != nil && status == domain.StatusPaid {
-		p.PaidAt = paidAt
-	}
-	if err := s.payments.Update(ctx, p); err != nil {
-		return fmt.Errorf("save payment: %w", err)
-	}
 	s.notify(ctx, p)
 	return nil
+}
+
+// maxUpdateAttempts bounds retries when other requests keep winning the
+// optimistic lock on the same payment.
+const maxUpdateAttempts = 3
+
+// update applies mutate to p and saves it with an optimistic lock.
+//
+// If another request saved the payment in between, the repository returns
+// domain.ErrConcurrentModification. update then reloads the latest version
+// and runs mutate again on it, so the change is neither lost nor applied on
+// top of stale data. For example, a "paid" webhook racing an "expired" sync
+// ends with exactly one of them winning and the other seeing a final status.
+//
+// mutate returns false to skip saving (nothing changed).
+func (s *PaymentService) update(ctx context.Context, p *domain.Payment, mutate func(*domain.Payment) (bool, error)) (bool, error) {
+	for attempt := 1; ; attempt++ {
+		changed, err := mutate(p)
+		if err != nil || !changed {
+			return false, err
+		}
+
+		err = s.payments.Update(ctx, p)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, domain.ErrConcurrentModification) || attempt == maxUpdateAttempts {
+			return false, fmt.Errorf("save payment %s: %w", p.ID, err)
+		}
+
+		fresh, err := s.payments.FindByID(ctx, p.ID)
+		if err != nil {
+			return false, fmt.Errorf("reload payment %s: %w", p.ID, err)
+		}
+		*p = *fresh
+	}
 }
 
 // notify sends the merchant webhook. Failures are logged, not returned: the

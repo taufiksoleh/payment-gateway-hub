@@ -38,6 +38,11 @@ type fixture struct {
 
 func setup(t *testing.T, gw ...gateway.Gateway) *fixture {
 	t.Helper()
+	return setupWithRepo(t, memory.NewPaymentRepo(), gw...)
+}
+
+func setupWithRepo(t *testing.T, paymentRepo usecase.PaymentRepository, gw ...gateway.Gateway) *fixture {
+	t.Helper()
 	ctx := context.Background()
 
 	fake := gatewaytest.New(fakeProvider)
@@ -64,7 +69,7 @@ func setup(t *testing.T, gw ...gateway.Gateway) *fixture {
 	}
 
 	payments := usecase.NewPaymentService(usecase.PaymentServiceDeps{
-		Payments:  memory.NewPaymentRepo(),
+		Payments:  paymentRepo,
 		Merchants: merchantRepo,
 		Creds:     credRepo,
 		Gateways:  registry,
